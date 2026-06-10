@@ -19,11 +19,21 @@ questions a melee actually cares about:
 | --- | --- | --- |
 | `formulas.lua` | Pure Lua combat math, zero Ashita dependencies, server profiles | **done (Phase 1)** |
 | `tests/test_formulas.lua` | Unit tests for every formula | **done (Phase 1)** |
-| `tools/extract_mobs.py` | Phoenix SQL → generated Lua mob lookup (level range, VIT/AGI/DEF/EVA at min and max level) | **done (Phase 2)** |
-| `tools/test_extract_mobs.py` | Unit tests for the extractor | **done (Phase 2)** |
-| `player.lua` | Char stats incl. attack/defense from packet `0x061`, equipment from the Ashita inventory manager, active haste buffs from buff IDs | planned (Phase 3) |
-| `advisor.lua` | Combines formulas + mob data + player state into recommendations | planned (Phase 3) |
+| `tools/extract_mobs.py` | Phoenix SQL → mob lookup (level range, VIT/AGI/DEF/EVA at min and max level) | **done (Phase 2)** |
+| `tools/extract_ws.py` | Phoenix WS scripts/era modules → weapon skill database | **done (Phase 3)** |
+| `tools/extract_items.py` | Phoenix item SQL → equipment database (exact gear haste, att/acc/stats, weapon D/delay/skill) | **done (Phase 3)** |
+| `tools/test_extract_*.py` | Unit tests for each extractor | **done** |
+| `player.lua` | Char stats from packet `0x061`, equipment via Ashita inventory, haste from buff IDs + item DB | **done (Phase 3)** |
+| `tests/test_player.lua` | Unit tests for the pure parts of player.lua | **done (Phase 3)** |
+| `advisor.lua` | Combines formulas + generated data + player state into recommendations | planned (Phase 4) |
 | `ui.lua` | Compact ImGui panel | planned (Phase 4) |
+
+> **Release packaging:** the generated tables (`data/mobs.lua`,
+> `data/weaponskills.lua`, `data/items.lua`) are **gitignored for
+> development but REQUIRED at runtime** — a release zip must bundle
+> them. Run the three extractor commands below against the pinned
+> Phoenix commit and ship the `data/` directory inside the addon
+> folder. Do not ship the formula engine without its data.
 
 ## Ground truth
 
@@ -140,21 +150,85 @@ Known simplifications: `MOB_STAT_MULTIPLIER`/`NM_STAT_MULTIPLIER`
 assumed 1.0 (server defaults), spawn-script mods not applied, float
 slopes evaluated in double precision.
 
-## Phase 3 notes
+## Phase 3: WS database, item database, player state
 
-Phoenix ships its complete pre-WotG weapon skill parameters in
-`modules/wotg/lua/weaponskills/*.lua` (fTP tables, stat mods, hit
-counts, crit/attack "varies with TP" tables, dated 2007-11-19) — that is
-the WS database `advisor.lua` should be generated from, not upstream's
-`scripts/actions/weaponskills/`.
+### Weapon skill extractor
+
+`tools/extract_ws.py` builds the WS database from the server's own
+dated era parameters, in priority order:
+
+1. `modules/wotg/lua/weaponskills/*.lua` — Phoenix's pre-WotG
+   (2007-11-19) overrides (158 weapon skills)
+2. `scripts/actions/weaponskills/*.lua` — upstream baseline for the
+   rest (50), taking only unconditional assignments, which excludes the
+   `USE_ADOULIN_WEAPON_SKILL_CHANGES` blocks automatically
+3. `sql/weapon_skills.sql` — WS id, weapon type, required skill level,
+   skillchain properties, job availability
+
+Params (`numHits`, `ftpMod`, `str_wsc`, `atkVaries`, `critVaries`, ...)
+are emitted verbatim from the server scripts; MP-drain style specials
+get `kind = 'special'`. Spot-verified transcripts: era Sturmwind is
+`str_wsc 0.3, atkVaries { 1.00, 1.25, 1.50 }`; era Asuran Fists is
+8 hits at `0.1/0.1` with `accVaries` — Phoenix's numbers, not wiki's.
+
+### Item extractor
+
+`tools/extract_items.py` joins `item_equipment` + `item_weapon` +
+`item_mods` into one equipment table: level, job/slot masks, weapon
+D/delay/skill, and a whitelisted mod set — **exact gear haste**
+(Mod 384, 10000-based: Swift Belt = 400 = 4%), att/acc/stats, DA/TA,
+Store TP, Dual Wield, Martial Arts. This is what makes "gear haste
+overcap" and "swap ring for attack" advice exact rather than guessed.
+Full Phoenix run: 15,398 items (5,129 weapons, 2,153 with gear haste).
+Phoenix's `pxi_item_basic.sql` era module only touches flags, so the
+base tables are authoritative for stats. `--all-mods` dumps everything
+for debugging.
+
+### player.lua and the haste precision model
+
+`player.lua` keeps a strict split between what is known and what is
+guessed:
+
+- **Gear haste is exact**: equipped item IDs join against the item DB.
+- **Magic haste is estimated**: buff IDs carry no magnitude (March
+  potency depends on the bard), so Haste/March/Slow/Elegy use
+  documented defaults and every report carries `magic_estimated`.
+  Users can pin known magnitudes via overrides
+  (`haste_from_buffs(buffs, { [214] = 0.140625 })`), which clears the
+  flag for that source.
+- **Ability haste**: Hasso is a fixed, known 10% (2H-only, exact);
+  Haste Samba is estimated.
+
+Everything except the small Ashita glue block (`attach`, packet event +
+inventory/buff reads) is pure Lua and unit-tested: packet `0x061`
+parsing (layout from Phoenix `0x061_clistatus.h`, including signed
+stat bonuses), buff classification, gear aggregation, and the
+`haste_report` integration with `formulas.haste`.
+
+## Generating the data tables
+
+```sh
+python3 Whetstone/tools/extract_mobs.py  --server /path/to/Phoenix \
+    --out Whetstone/data/mobs.lua         --source-label "phoenixffxi/Phoenix @ <commit>"
+python3 Whetstone/tools/extract_ws.py    --server /path/to/Phoenix \
+    --out Whetstone/data/weaponskills.lua --source-label "phoenixffxi/Phoenix @ <commit>"
+python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
+    --out Whetstone/data/items.lua        --source-label "phoenixffxi/Phoenix @ <commit>"
+```
+
+All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
+**these files ship in the release zip** even though they are gitignored.
 
 ## Running the tests
 
 ```sh
-lua5.1 Whetstone/tests/test_formulas.lua       # or: busted Whetstone/tests/test_formulas.lua
+lua5.1 Whetstone/tests/test_formulas.lua       # or: busted ...
+lua5.1 Whetstone/tests/test_player.lua
 python3 Whetstone/tools/test_extract_mobs.py
+python3 Whetstone/tools/test_extract_ws.py
+python3 Whetstone/tools/test_extract_items.py
 ```
 
-Every expected value in both suites is hand-derived from the server
+Every expected value in these suites is hand-derived from the server
 source in a comment next to the assertion — the tests are not generated
 from the implementations.

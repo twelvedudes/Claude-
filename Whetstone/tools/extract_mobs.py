@@ -254,8 +254,9 @@ def eva_rank_from_skill_ranks(main_rank: int, sub_rank: int) -> int:
 # SQL dump parsing (one INSERT tuple per line, as dumped by LSB)
 # ---------------------------------------------------------------------
 
-INSERT_RE = re.compile(r"INSERT INTO `?(\w+)`?\s+VALUES\s*\((.*)\);\s*$",
-                       re.IGNORECASE)
+INSERT_RE = re.compile(
+    r"INSERT INTO `?(\w+)`?\s+VALUES\s*\((.*)\);\s*(?:--.*)?$",
+    re.IGNORECASE)
 
 
 def split_values(raw: str) -> list:
