@@ -281,6 +281,7 @@ function M.evaluate(p)
                 bonus      = player.crit_rate_bonus,
                 kind       = 'melee', -- GetCritHitRate path: floor 0
             }),
+            crit_dmg_bonus   = player.crit_dmg_bonus,
             h2h              = is_h2h,
             two_handed       = two_handed,
             profile          = profile,
@@ -508,6 +509,7 @@ function M.evaluate(p)
                             two_handed       = two_handed,
                             target_agi       = point.stats.agi,
                             crit_bonus       = player.crit_rate_bonus,
+                            crit_dmg_bonus   = player.crit_dmg_bonus,
                             profile          = profile,
                         })
 

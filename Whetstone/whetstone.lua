@@ -283,6 +283,10 @@ local function snapshot()
             attack    = stats.attack,
             accuracy  = accuracy,
             ws_skill  = skill_value,
+            -- gear crit mods are EXACT via the item DB (whitelisted
+            -- Mod 165 / Mod 421), same precision class as gear haste
+            crit_rate_bonus = (gear.crit_rate or 0) / 100,
+            crit_dmg_bonus  = (gear.crit_dmg or 0) / 100,
             weapon    =
             {
                 dmg   = main.dmg,
@@ -335,26 +339,40 @@ local function update_expectations(snap, report)
             { name = ranked.name, expected = ranked.expected }
     end
 
+    -- The logged prediction must include crits: observations do.
+    local crit_rate = formulas.crit_rate(
+    {
+        dex        = snap.player.stats.dex,
+        target_agi = worst.stats.agi,
+        bonus      = snap.player.crit_rate_bonus,
+        kind       = 'melee',
+    })
+
+    local swing = formulas.melee_swing(
+    {
+        weapon_dmg       = weapon.dmg,
+        fstr             = formulas.fstr(snap.player.stats.str,
+                                         worst.stats.vit, rank),
+        attack           = snap.player.attack,
+        defense          = worst.stats.def,
+        weapon           = weapon.skill,
+        acc              = snap.player.accuracy,
+        eva              = worst.stats.eva,
+        attacker_level   = snap.player.level,
+        target_level     = worst.level,
+        level_correction = snap.level_correction,
+        crit_rate        = crit_rate,
+        crit_dmg_bonus   = snap.player.crit_dmg_bonus,
+        two_handed       = TWO_HANDED[weapon.skill] or false,
+        h2h              = weapon.skill == 'hand_to_hand',
+    })
+    swing.crit_rate = crit_rate
+
     swinglog.set_expectations(
     {
         target_name = report.target.name,
-        swing = formulas.melee_swing(
-        {
-            weapon_dmg       = weapon.dmg,
-            fstr             = formulas.fstr(snap.player.stats.str,
-                                             worst.stats.vit, rank),
-            attack           = snap.player.attack,
-            defense          = worst.stats.def,
-            weapon           = weapon.skill,
-            acc              = snap.player.accuracy,
-            eva              = worst.stats.eva,
-            attacker_level   = snap.player.level,
-            target_level     = worst.level,
-            level_correction = snap.level_correction,
-            two_handed       = TWO_HANDED[weapon.skill] or false,
-            h2h              = weapon.skill == 'hand_to_hand',
-        }),
-        ws = ws_by_id,
+        swing       = swing,
+        ws          = ws_by_id,
     })
 end
 

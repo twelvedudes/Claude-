@@ -42,6 +42,7 @@ FIXTURE_SQL = {
         "INSERT INTO `item_mods` VALUES (15457,23,-5);   -- ATT: -5",
         "INSERT INTO `item_mods` VALUES (17559,8,4);     -- STR: 4",
         "INSERT INTO `item_mods` VALUES (17559,288,5);   -- DA: 5",
+        "INSERT INTO `item_mods` VALUES (17559,421,3);   -- Crit dmg +3%",
         # not in whitelist (Mod 311 = COUNTER) -> dropped by default
         "INSERT INTO `item_mods` VALUES (17559,311,10);",
         # mods for an item with no equipment row -> ignored
@@ -85,6 +86,7 @@ class ExtractItemsTests(unittest.TestCase):
         self.assertEqual(276, axe['weapon']['delay'])
         self.assertEqual(4, axe['mods']['str'])
         self.assertEqual(5, axe['mods']['double_attack'])
+        self.assertEqual(3, axe['mods']['crit_dmg'])
 
     def test_whitelist_drops_unlisted_mods(self):
         self.assertNotIn('mod311', self.items[17559]['mods'])

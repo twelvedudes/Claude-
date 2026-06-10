@@ -11,6 +11,10 @@ verdict per beta-checklist item:
                   predicted pDIF bounds (x 1.00-1.05 melee random)
     SPIKE         frequency of damage == exactly 1.0 x base vs the
                   predicted spike chance (~1/3 near wRatio 1.0)
+    CRIT_RATE     observed crit frequency among landed swings vs the
+                  predicted melee crit rate (GetCritHitRate path),
+                  Wilson 95% CI - run on a singleton target so dDEX
+                  is exact
     WS_MEAN       per-WS observed mean vs prediction; a consistent
                   ~+10% excess on WSC-heavy skills suggests the legacy
                   alpha assumption is wrong (Adoulin rules live)
@@ -34,7 +38,8 @@ MELEE_RE = re.compile(
     r'predicted_mean=(?P<mean>-?[\d.]+) '
     r'base=(?P<base>-?\d+) spike=(?P<spike>-?[\d.]+) '
     r'pdif_range=(?P<lower>-?[\d.]+)-(?P<upper>-?[\d.]+) '
-    r'hit_rate=(?P<hit_rate>-?[\d.]+) target=(?P<target>.+)$')
+    r'hit_rate=(?P<hit_rate>-?[\d.]+) '
+    r'crit_rate=(?P<crit_rate>-?[\d.]+) target=(?P<target>.+)$')
 
 WS_RE = re.compile(
     r'ws id=(?P<id>\d+) name=(?P<name>\S+) observed=(?P<observed>\d+) '
@@ -80,6 +85,7 @@ def parse_log(text: str) -> dict:
                 'lower': float(row['lower']),
                 'upper': float(row['upper']),
                 'hit_rate': float(row['hit_rate']),
+                'crit_rate': float(row['crit_rate']),
                 'target': row['target'],
             })
             continue
@@ -237,6 +243,45 @@ def check_spike(melee: list) -> dict:
     return result
 
 
+def check_crit_rate(melee: list) -> dict:
+    """Crit frequency among LANDED swings vs the predicted melee crit
+    rate. Misses carry no crit information and are excluded."""
+    landed = [row for row in melee
+              if row['outcome'] in ('hit', 'crit')
+              and row['crit_rate'] >= 0]
+
+    result = {'check': 'CRIT_RATE', 'swings': len(landed)}
+
+    if len(landed) < 200:
+        result['verdict'] = 'INSUFFICIENT_DATA'
+        result['detail'] = ('need >= 200 landed swings (have %d); use '
+                            'a singleton target so dDEX is exact'
+                            % len(landed))
+        return result
+
+    crits = sum(1 for row in landed if row['outcome'] == 'crit')
+    predicted = sum(row['crit_rate'] for row in landed) / len(landed)
+
+    low, high = wilson_interval(crits, len(landed))
+    result['rate'] = crits / len(landed)
+    result['predicted'] = predicted
+    result['ci'] = (low, high)
+
+    if low <= predicted <= high:
+        result['verdict'] = 'PASS'
+        result['detail'] = ('crit rate %.3f vs predicted %.3f '
+                            '(CI [%.3f, %.3f])'
+                            % (result['rate'], predicted, low, high))
+    else:
+        result['verdict'] = 'FAIL'
+        result['detail'] = ('crit rate %.3f CI [%.3f, %.3f] excludes '
+                            'predicted %.3f - check dDEX tier curve / '
+                            'gear CRITHITRATE flow'
+                            % (result['rate'], low, high, predicted))
+
+    return result
+
+
 def check_ws_mean(ws: list) -> list:
     """Per weapon skill: observed mean within the CI of the prediction.
     A consistent ~+10% excess flags the legacy-alpha assumption."""
@@ -307,6 +352,7 @@ def analyze(text: str) -> list:
         check_hit_ceiling(parsed['melee']),
         check_pdif_bounds(parsed['melee']),
         check_spike(parsed['melee']),
+        check_crit_rate(parsed['melee']),
     ]
     results.extend(check_ws_mean(parsed['ws']))
 

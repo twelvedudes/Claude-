@@ -73,6 +73,7 @@ Adjacent but out of the damage model (documented, not modeled):
 | Slow | dMND-scaled (white magic) / fixed Hojo tiers sharing effect 13 → estimated |
 | March | skill+instrument dependent (`enhancing_song.lua`) → estimated, user-overridable |
 | Last Resort 2H haste | `modules/soa/lua/job_adjustments.lua` — merit-dependent → estimated |
+| Gear crit mods (advisor `crit_rate_bonus`/`crit_dmg_bonus`) | `item_mods.sql` Mod 165 `CRITHITRATE` + Mod 421 `CRIT_DMG_INCREASE` (whitelisted, exact via item DB) — out of model: Mod 964 `RANGED_CRIT_DMG_INCREASE`, Mod 563 `MAGIC_CRIT_DMG_INCREASE` (no ranged/magic crit damage in the advisor), Mod 908 `CRIT_DEF_BONUS` (mob-side; nets against crit_dmg in `melee_pdif` if ever supplied) |
 
 | Extractor | Ground truth | Module SQL handled |
 | --- | --- | --- |

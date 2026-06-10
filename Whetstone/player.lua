@@ -266,7 +266,7 @@ local SUMMED_MODS =
 {
     'str', 'dex', 'vit', 'agi', 'int', 'mnd', 'chr',
     'att', 'ratt', 'acc', 'racc', 'attp', 'eva',
-    'store_tp', 'crit_rate', 'double_attack', 'triple_attack',
+    'store_tp', 'crit_rate', 'crit_dmg', 'double_attack', 'triple_attack',
     'dual_wield', 'martial_arts', 'subtle_blow', 'delay_p',
 }
 

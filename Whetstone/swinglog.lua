@@ -175,7 +175,8 @@ function M.observe(action, player_id)
                 lines[#lines + 1] = string.format(
                     '%s melee %s observed=%d predicted_mean=%.1f '
                     .. 'base=%d spike=%.3f '
-                    .. 'pdif_range=%.3f-%.3f hit_rate=%.2f target=%s',
+                    .. 'pdif_range=%.3f-%.3f hit_rate=%.2f '
+                    .. 'crit_rate=%.3f target=%s',
                     stamp, outcome, result.damage,
                     predicted and predicted.expected or -1,
                     predicted and predicted.base or -1,
@@ -183,6 +184,7 @@ function M.observe(action, player_id)
                     predicted and predicted.pdif.lower or -1,
                     predicted and predicted.pdif.upper or -1,
                     predicted and predicted.hit_rate or -1,
+                    predicted and predicted.crit_rate or -1,
                     M.expectations.target_name or '?')
             end
         end

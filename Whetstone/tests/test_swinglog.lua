@@ -255,6 +255,7 @@ describe('predicted-vs-observed log lines', function()
                 expected = 130.5,
                 base = 87,
                 hit_rate = 0.95,
+                crit_rate = 0.08,
                 pdif = { lower = 1.54, upper = 2.0,
                          spike_chance = 0.333 },
             },
@@ -268,6 +269,7 @@ describe('predicted-vs-observed log lines', function()
         assert.is_true(lines[1]:find('predicted_mean=130.5') ~= nil)
         assert.is_true(lines[1]:find('base=87') ~= nil)
         assert.is_true(lines[1]:find('spike=0.333') ~= nil)
+        assert.is_true(lines[1]:find('crit_rate=0.080') ~= nil)
         assert.is_true(lines[1]:find('target=Test Crab') ~= nil)
     end)
 

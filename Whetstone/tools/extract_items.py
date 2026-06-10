@@ -23,6 +23,7 @@ Emitted mod keys (src/map/modifier.h ids):
     eva                                68
     store_tp                           73
     crit_rate                          165
+    crit_dmg                           421   (CRIT_DMG_INCREASE, percent)
     delay_flat                         171   (flat delay add, weapons)
     martial_arts                       173
     dual_wield                         259
@@ -61,6 +62,7 @@ MOD_KEYS = {
     68: 'eva',
     73: 'store_tp',
     165: 'crit_rate',
+    421: 'crit_dmg',
     171: 'delay_flat',
     173: 'martial_arts',
     259: 'dual_wield',

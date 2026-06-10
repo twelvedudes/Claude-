@@ -14,11 +14,12 @@ import analyze_swings as X  # noqa: E402
 
 
 def melee_line(outcome, observed, base=100, spike=0.0, lower=1.54,
-               upper=2.0, hit_rate=0.95):
+               upper=2.0, hit_rate=0.95, crit_rate=0.10):
     return ('12:00:00 melee %s observed=%d predicted_mean=150.0 '
             'base=%d spike=%.3f pdif_range=%.3f-%.3f hit_rate=%.2f '
-            'target=Test Crab'
-            % (outcome, observed, base, spike, lower, upper, hit_rate))
+            'crit_rate=%.3f target=Test Crab'
+            % (outcome, observed, base, spike, lower, upper, hit_rate,
+               crit_rate))
 
 
 def ws_line(name, observed, mean=400.0):
@@ -127,6 +128,34 @@ class SpikeTests(unittest.TestCase):
         self.assertEqual('INSUFFICIENT_DATA', result['verdict'])
 
 
+class CritRateTests(unittest.TestCase):
+    def test_pass_at_predicted_rate(self):
+        # predicted 10%, observed 22/220 = 10%
+        lines = [melee_line('hit', 180)] * 198 \
+            + [melee_line('crit', 280)] * 22
+        result = X.check_crit_rate(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('PASS', result['verdict'])
+
+    def test_fail_when_rate_disagrees(self):
+        # predicted 10%, observed 30% - tier curve or gear flow broken
+        lines = [melee_line('hit', 180)] * 140 \
+            + [melee_line('crit', 280)] * 60
+        result = X.check_crit_rate(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('FAIL', result['verdict'])
+        self.assertIn('dDEX', result['detail'])
+
+    def test_misses_carry_no_crit_information(self):
+        # 300 misses + 100 landed: only landed count -> insufficient
+        lines = [melee_line('other:15', 0)] * 300 \
+            + [melee_line('hit', 180)] * 100
+        result = X.check_crit_rate(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('INSUFFICIENT_DATA', result['verdict'])
+        self.assertEqual(100, result['swings'])
+
+
 class WsMeanTests(unittest.TestCase):
     def test_pass_when_mean_matches(self):
         # observed scattered around the prediction
@@ -164,6 +193,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn('HIT_CEILING', checks)
         self.assertIn('PDIF_BOUNDS', checks)
         self.assertIn('SPIKE', checks)
+        self.assertIn('CRIT_RATE', checks)
         self.assertIn('WS_MEAN:sturmwind', checks)
 
 
