@@ -169,11 +169,17 @@ function M.observe(action, player_id)
                     outcome = 'other:' .. result.message
                 end
 
+                -- base and spike feed tools/analyze_swings.py:
+                -- observed/base reconstructs pDIF per swing, and the
+                -- spike outcome lands at exactly 1.0 x base.
                 lines[#lines + 1] = string.format(
                     '%s melee %s observed=%d predicted_mean=%.1f '
+                    .. 'base=%d spike=%.3f '
                     .. 'pdif_range=%.3f-%.3f hit_rate=%.2f target=%s',
                     stamp, outcome, result.damage,
                     predicted and predicted.expected or -1,
+                    predicted and predicted.base or -1,
+                    predicted and predicted.pdif.spike_chance or -1,
                     predicted and predicted.pdif.lower or -1,
                     predicted and predicted.pdif.upper or -1,
                     predicted and predicted.hit_rate or -1,
@@ -201,6 +207,113 @@ function M.observe(action, player_id)
                 M.expectations.target_name or '?')
         end
     end
+
+    return lines
+end
+
+-- =====================================================================
+-- Session header (full assumed state, written when /whet debug starts)
+-- =====================================================================
+
+-- Effects that are KNOWN to matter but are not in the haste model;
+-- their presence gets an explicit warning instead of silence.
+M.WARN_EFFECTS =
+{
+    [251] = 'Food: server-side att/def are included in 0x061, but the '
+        .. 'ACCURACY model uses gear acc only - food acc is NOT counted',
+}
+
+-- p:
+--   version, profile        addon version string, profile name
+--   stats                   parsed 0x061 (jobs, stats, attack, defense)
+--   skills                  parsed 0x062 (by_name)
+--   weapon_skill            mainhand skill name ('great_axe')
+--   accuracy                derived accuracy in use
+--   haste                   player.haste_report() output
+--   gear_pieces             player.gear_stats().pieces
+--   buffs                   raw active effect id array
+--   known_buffs             player.BUFFS table (for classification)
+--   target_name, pinned_level, level_range {lo, hi}
+-- Returns an array of header lines.
+function M.session_header(p)
+    local lines = {}
+
+    local function add(format, ...)
+        lines[#lines + 1] = string.format(format, ...)
+    end
+
+    add('=== whetstone session %s ===', os.date('%Y-%m-%d %H:%M:%S'))
+    add('version=%s profile=%s', p.version or '?', p.profile or 'phoenix')
+
+    local stats = p.stats or {}
+    local s = stats.stats or {}
+
+    add('player job=%s/%s lv=%d attack=%d defense=%d',
+        tostring(stats.main_job), tostring(stats.sub_job),
+        stats.main_level or 0, stats.attack or 0, stats.defense or 0)
+    add('stats str=%d dex=%d vit=%d agi=%d int=%d mnd=%d chr=%d',
+        s.str or 0, s.dex or 0, s.vit or 0, s.agi or 0,
+        s['int'] or 0, s.mnd or 0, s.chr or 0)
+
+    local skill = p.skills and p.skills.by_name
+        and p.skills.by_name[p.weapon_skill or '']
+
+    add('weapon=%s skill=%d%s derived_accuracy=%d',
+        tostring(p.weapon_skill), skill and skill.value or -1,
+        skill and (skill.capped and ' (capped)' or ' (UNCAPPED)') or '',
+        p.accuracy or -1)
+
+    if p.haste then
+        add('haste magic=%.4f%s ability=%.4f gear=%.4f (exact) '
+            .. 'multiplier=%.4f overcap=%.4f',
+            p.haste.magic or 0,
+            p.haste.magic_estimated and '~' or '',
+            p.haste.ability or 0, p.haste.gear or 0,
+            p.haste.multiplier or 1, p.haste.gear_overcap or 0)
+    end
+
+    for _, piece in ipairs(p.gear_pieces or {}) do
+        if piece.haste and piece.haste > 0 then
+            add('gear_haste %s=%s %.2f%%', piece.slot, piece.name,
+                piece.haste * 100)
+        end
+    end
+
+    local known = p.known_buffs or {}
+    local unaccounted = {}
+
+    for _, id in ipairs(p.buffs or {}) do
+        if known[id] then
+            local buff = known[id]
+            add('buff %d=%s %s%.4f%s', id, buff.name, buff.category
+                and (buff.category .. ' ') or '', buff.amount or 0,
+                buff.estimated and ' ~est' or '')
+        elseif M.WARN_EFFECTS[id] then
+            add('WARNING effect %d active: %s', id, M.WARN_EFFECTS[id])
+        else
+            unaccounted[#unaccounted + 1] = id
+        end
+    end
+
+    if #unaccounted > 0 then
+        add('WARNING unaccounted effect ids (not in haste/damage '
+            .. 'model): %s', table.concat(unaccounted, ','))
+    end
+
+    if p.target_name then
+        if p.pinned_level then
+            add('target=%s pinned_level=%d', p.target_name,
+                p.pinned_level)
+        elseif p.level_range then
+            add('target=%s level_range=%d-%d UNPINNED '
+                .. '(predictions use worst case)', p.target_name,
+                p.level_range[1], p.level_range[2])
+        else
+            add('target=%s', p.target_name)
+        end
+    end
+
+    add('=== end header ===')
 
     return lines
 end

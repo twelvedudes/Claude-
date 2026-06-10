@@ -253,8 +253,10 @@ describe('predicted-vs-observed log lines', function()
             swing =
             {
                 expected = 130.5,
+                base = 87,
                 hit_rate = 0.95,
-                pdif = { lower = 1.54, upper = 2.0 },
+                pdif = { lower = 1.54, upper = 2.0,
+                         spike_chance = 0.333 },
             },
         })
 
@@ -264,6 +266,8 @@ describe('predicted-vs-observed log lines', function()
         assert.is_true(lines[1]:find('crit observed=245') ~= nil)
         assert.is_true(lines[2]:find('hit observed=117') ~= nil)
         assert.is_true(lines[1]:find('predicted_mean=130.5') ~= nil)
+        assert.is_true(lines[1]:find('base=87') ~= nil)
+        assert.is_true(lines[1]:find('spike=0.333') ~= nil)
         assert.is_true(lines[1]:find('target=Test Crab') ~= nil)
     end)
 
@@ -275,6 +279,74 @@ describe('predicted-vs-observed log lines', function()
         D.set_expectations(nil)
 
         assert.are.equal(0, #D.observe(action, 0x104))
+    end)
+end)
+
+-- =====================================================================
+describe('session header', function()
+    local header = D.session_header(
+    {
+        version = '0.6.0',
+        profile = 'phoenix',
+        stats =
+        {
+            main_job = 1, sub_job = 13, main_level = 75,
+            attack = 420, defense = 310,
+            stats = { str = 82, dex = 62, vit = 65, agi = 55,
+                      int = 51, mnd = 47, chr = 43 },
+        },
+        skills = { by_name = { great_axe = { value = 269,
+                                             capped = true } } },
+        weapon_skill = 'great_axe',
+        accuracy = 333,
+        haste =
+        {
+            magic = 0.1465, magic_estimated = false, ability = 0.10,
+            gear = 0.07, multiplier = 0.6835, gear_overcap = 0,
+        },
+        gear_pieces =
+        {
+            { slot = 'waist', name = 'swift_belt', haste = 0.04 },
+            { slot = 'body', name = 'haubergeon', haste = 0 },
+        },
+        buffs = { 33, 353, 251, 444 },
+        known_buffs =
+        {
+            [33] = { name = 'Haste', category = 'magic',
+                     amount = 0.1465, estimated = false },
+            [353] = { name = 'Hasso', category = 'ability',
+                      amount = 0.10, estimated = false },
+        },
+        target_name = 'Test Crab',
+        level_range = { 20, 25 },
+    })
+
+    local text = table.concat(header, '\n')
+
+    it('dumps the full assumed state', function()
+        assert.is_true(text:find('profile=phoenix') ~= nil)
+        assert.is_true(text:find('skill=269 %(capped%)') ~= nil)
+        assert.is_true(text:find('derived_accuracy=333') ~= nil)
+        assert.is_true(text:find('gear_haste waist=swift_belt 4.00%%') ~= nil)
+        assert.is_true(text:find('buff 33=Haste magic 0.1465') ~= nil)
+    end)
+
+    it('warns about food (acc model excludes food acc)', function()
+        assert.is_true(text:find('WARNING effect 251') ~= nil)
+        assert.is_true(text:find('food acc is NOT counted') ~= nil)
+    end)
+
+    it('lists unaccounted effect ids', function()
+        assert.is_true(text:find('unaccounted effect ids') ~= nil)
+        assert.is_true(text:find('444') ~= nil)
+    end)
+
+    it('flags unpinned target ranges', function()
+        assert.is_true(text:find('level_range=20%-25 UNPINNED') ~= nil)
+    end)
+
+    it('omits zero-haste gear from the haste breakdown', function()
+        assert.is_nil(text:find('haubergeon'))
     end)
 end)
 

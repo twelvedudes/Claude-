@@ -259,6 +259,52 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(68, e['levels'][20]['eva'])
         self.assertTrue(e['nm'])
 
+    def test_split_emission_balances_across_zones(self):
+        with tempfile.TemporaryDirectory() as out:
+            out_dir = Path(out) / 'mobs'
+            counts = X.emit_split(self.mobs, self.accounting, out_dir,
+                                  'fixture')
+
+            # one file per zone + the index
+            self.assertEqual({1, 100}, set(counts))
+            self.assertTrue((out_dir / 'index.lua').exists())
+            self.assertTrue((out_dir / 'zone_1.lua').exists())
+            self.assertTrue((out_dir / 'zone_100.lua').exists())
+
+            # index totals must equal extraction accounting
+            index_text = (out_dir / 'index.lua').read_text()
+            self.assertIn('total_entries = %d'
+                          % self.accounting['emitted'], index_text)
+            self.assertEqual(self.accounting['emitted'],
+                             sum(counts.values()))
+
+            # zone file carries the same exact rows as monolithic mode
+            zone1 = (out_dir / 'zone_1.lua').read_text()
+            self.assertIn(
+                '[21] = { vit = 22, agi = 22, def = 80, eva = 72 }',
+                zone1)
+
+    def test_split_raises_on_row_loss(self):
+        # Simulate a future bug that drops a zone between extraction
+        # and emission: the cross-split conservation check must fire.
+        crippled = dict(self.mobs)
+        del crippled[100]
+
+        with tempfile.TemporaryDirectory() as out:
+            with self.assertRaises(X.ConservationError):
+                X.emit_split(crippled, self.accounting,
+                             Path(out) / 'mobs', 'fixture')
+
+    def test_singleton_validation_targets(self):
+        # Sub Crab in West Ronfaure (zone 100) spawns at exactly 30/30
+        zone_names = {'WEST_RONFAURE': 100}
+        lines = X.emit_singletons(self.mobs, zone_names)
+
+        self.assertEqual(1, len(lines))
+        self.assertIn('Sub Crab', lines[0])
+        self.assertIn('Lv.30', lines[0])
+        self.assertIn('def=109', lines[0])
+
     def test_lua_emission_is_loadable_shape(self):
         text = X.emit_lua(self.mobs, 'fixture')
 

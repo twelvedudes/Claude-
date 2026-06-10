@@ -274,11 +274,12 @@ function M.evaluate(p)
             attacker_level   = player.level,
             target_level     = point.level,
             level_correction = p.level_correction,
-            crit_rate        = formulas.crit_rate(
+            crit_rate        = overrides.crit_rate or formulas.crit_rate(
             {
                 dex        = player.stats.dex,
                 target_agi = point.stats.agi,
                 bonus      = player.crit_rate_bonus,
+                kind       = 'melee', -- GetCritHitRate path: floor 0
             }),
             h2h              = is_h2h,
             two_handed       = two_handed,
@@ -375,6 +376,42 @@ function M.evaluate(p)
                 delta, target.ambiguous and not target.pinned_level)
         else
             add('fstr', 'fSTR capped vs this target', nil)
+        end
+    end
+
+    -- ----- 3b. dDEX crit tier distance ---------------------------------
+    do
+        local worst, _ = point_range(target.points, function(point)
+            return { metric = -point.stats.agi, point = point }
+        end)
+        local point = worst.point -- highest AGI candidate
+
+        local info = formulas.crit_info(player.stats.dex, point.stats.agi)
+
+        -- Informational "at cap" is noise; only a reachable tier with a
+        -- real damage delta earns a ranked line.
+        if not info.at_cap then
+            local base_rate = formulas.crit_rate(
+            {
+                dex        = player.stats.dex,
+                target_agi = point.stats.agi,
+                bonus      = player.crit_rate_bonus,
+                kind       = 'melee',
+            })
+            local next_rate = formulas.clamp(
+                base_rate + (info.next_bonus - info.bonus), 0, 1)
+
+            local now = swing(point, { crit_rate = base_rate })
+            local bumped = swing(point, { crit_rate = next_rate })
+            local delta = bumped.expected / now.expected - 1
+
+            if delta > 0 then
+                add('crit', string.format(
+                    '+%d DEX -> +%.0f%% crit (+%.1f%% per swing)',
+                    info.dex_to_next,
+                    (info.next_bonus - info.bonus) * 100, delta * 100),
+                    delta, target.ambiguous and not target.pinned_level)
+            end
         end
     end
 

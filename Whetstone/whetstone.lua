@@ -17,7 +17,10 @@
       /whet march <pct>  set March potency override (e.g. 14.06)
       /whet quest        toggle ranking of quest-locked WS (default off)
       /whet debug        toggle predicted-vs-observed swing logging to
-                         <addon>/whetstone_swings.log
+                         <addon>/whetstone_swings.log (writes a full
+                         session-state header on enable)
+      /whet selftest     exercise every Ashita glue call and write
+                         <addon>/whetstone_selftest.log
 
     This file is Ashita glue and needs an in-game shakedown; everything
     it calls is unit-tested pure Lua.
@@ -25,7 +28,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.5.0'
+addon.version = '0.1.0-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -39,8 +42,21 @@ local player   = require('player')
 local advisor  = require('advisor')
 local ui       = require('ui')
 local swinglog = require('swinglog')
+local selftest = require('selftest')
+
+local state =
+{
+    pinned_level    = nil,
+    march_override  = nil,
+    assume_quest_ws = false,
+    debug_log       = false,
+    last_report     = nil,
+    last_haste      = nil,
+}
 
 local data = { mobs = nil, ws = nil, items = nil }
+local mob_index = nil -- split layout: data/mobs/index.lua
+local mob_cache = {}  -- one zone resident at a time (32-bit process)
 
 local function load_data(name)
     local ok, result = pcall(require, name)
@@ -54,6 +70,71 @@ local function load_data(name)
     return result
 end
 
+-- forward declarations (defined after snapshot, used by the command
+-- handler closures)
+local append_log
+local write_session_header
+local run_selftest
+
+-- One zone's mob table at a time: the full world is ~4 MB of source
+-- that parses into far more than that as Lua structures inside FFXI's
+-- 32-bit address space. Loads on demand, unloads the previous zone,
+-- and logs the Lua heap before/after in debug mode.
+local function mobs_for_zone(zone)
+    if data.mobs then -- monolithic data/mobs.lua fallback
+        return data.mobs
+    end
+
+    if not mob_index then
+        return nil
+    end
+
+    if mob_cache.zone == zone then
+        return mob_cache.wrapped
+    end
+
+    local before_kb = collectgarbage('count')
+
+    if mob_cache.module then
+        package.loaded[mob_cache.module] = nil
+    end
+
+    mob_cache = {}
+    collectgarbage('collect')
+
+    local info = mob_index.zones and mob_index.zones[zone]
+
+    if not info then
+        return nil
+    end
+
+    local module_name = 'mobs.' .. info.file
+    local ok, zone_table = pcall(require, module_name)
+
+    if not ok then
+        return nil
+    end
+
+    collectgarbage('collect')
+    local after_kb = collectgarbage('count')
+
+    mob_cache =
+    {
+        zone    = zone,
+        module  = module_name,
+        wrapped = { [zone] = zone_table },
+    }
+
+    if state.debug_log and append_log then
+        append_log({ string.format(
+            '%s zoneload zone=%d entries=%d lua_heap_kb %.0f -> %.0f',
+            os.date('%H:%M:%S'), zone, info.entries or -1,
+            before_kb, after_kb) })
+    end
+
+    return mob_cache.wrapped
+end
+
 local JOB_NAMES = { 'WAR', 'MNK', 'WHM', 'BLM', 'RDM', 'THF', 'PLD',
                     'DRK', 'BST', 'BRD', 'RNG', 'SAM', 'NIN', 'DRG',
                     'SMN', 'BLU', 'COR', 'PUP', 'DNC', 'SCH', 'GEO',
@@ -65,18 +146,18 @@ local TWO_HANDED =
     polearm = true, great_katana = true, staff = true,
 }
 
-local state =
-{
-    pinned_level    = nil,
-    march_override  = nil,
-    assume_quest_ws = false,
-    debug_log       = false,
-    last_report     = nil,
-    last_haste      = nil,
-}
-
 ashita.events.register('load', 'whetstone_load', function()
-    data.mobs  = load_data('mobs')
+    -- Prefer the split per-zone layout; fall back to monolithic.
+    local ok, index = pcall(require, 'mobs.index')
+
+    if ok and type(index) == 'table' and index.zones then
+        mob_index = index
+        print(('[whetstone] split mob data: %d entries indexed')
+            :format(index.total_entries or -1))
+    else
+        data.mobs = load_data('mobs')
+    end
+
     data.ws    = load_data('weaponskills')
     data.items = load_data('items')
 
@@ -104,6 +185,12 @@ ashita.events.register('command', 'whetstone_command', function(e)
         state.debug_log = not state.debug_log
         print('[whetstone] swing logging: '
             .. (state.debug_log and 'ON -> whetstone_swings.log' or 'OFF'))
+
+        if state.debug_log then
+            write_session_header()
+        end
+    elseif args[2] == 'selftest' then
+        run_selftest()
     else
         ui.visible[1] = not ui.visible[1]
     end
@@ -117,7 +204,7 @@ local function snapshot()
     local stats = player.state.char_stats
     local skills = player.state.skills
 
-    if not stats or not skills or not data.mobs then
+    if not stats or not skills then
         return nil
     end
 
@@ -136,6 +223,14 @@ local function snapshot()
         :GetMemberZone(0)
 
     if not name or name == '' then
+        return nil
+    end
+
+    -- Per-zone mob table (split layout) or the monolithic fallback;
+    -- loading swaps the previous zone out of the 32-bit heap.
+    local mobs = mobs_for_zone(zone)
+
+    if not mobs then
         return nil
     end
 
@@ -200,7 +295,8 @@ local function snapshot()
         haste           = haste,
         target          = { zone = zone, name = name,
                             level = state.pinned_level },
-        data            = data,
+        data            = { mobs = mobs, ws = data.ws,
+                            items = data.items },
         tp              = AshitaCore:GetMemoryManager():GetParty()
             :GetMemberTP(0),
         assume_quest_ws = state.assume_quest_ws,
@@ -262,7 +358,7 @@ local function update_expectations(snap, report)
     })
 end
 
-local function append_log(lines)
+append_log = function(lines)
     if #lines == 0 then
         return
     end
@@ -276,6 +372,169 @@ local function append_log(lines)
 
         file:close()
     end
+end
+
+-- Dump the full assumed state at the top of a debug session so every
+-- swing line in the log can be interpreted offline.
+write_session_header = function()
+    local ok, snap = pcall(snapshot)
+    local gear = player.gear_stats(player.state.equipment,
+                                   data.items or {})
+
+    local level_range = nil
+    if state.last_report and state.last_report.target
+        and state.last_report.target.level_min then
+        level_range = { state.last_report.target.level_min,
+                        state.last_report.target.level_max }
+    end
+
+    append_log(swinglog.session_header(
+    {
+        version      = addon.version,
+        profile      = 'phoenix',
+        stats        = player.state.char_stats or {},
+        skills       = player.state.skills,
+        weapon_skill = ok and snap and snap.player.weapon.skill or nil,
+        accuracy     = ok and snap and snap.player.accuracy or nil,
+        haste        = ok and snap and snap.haste or nil,
+        gear_pieces  = gear.pieces,
+        buffs        = player.state.buffs,
+        known_buffs  = player.BUFFS,
+        target_name  = ok and snap and snap.target.name or nil,
+        pinned_level = state.pinned_level,
+        level_range  = level_range,
+    }))
+end
+
+-- /whet selftest: exercise every Ashita glue call and write a readable
+-- diagnostic report, so shakedown failures name the exact call that
+-- misbehaved instead of failing silently.
+run_selftest = function()
+    local expect = selftest.expect
+
+    local checks =
+    {
+        { name = 'memory_manager', fn = function()
+            expect(AshitaCore ~= nil, 'AshitaCore missing')
+            expect(AshitaCore:GetMemoryManager() ~= nil,
+                'GetMemoryManager returned nil')
+            return 'present'
+        end },
+
+        { name = 'inventory_equipped_slots', fn = function()
+            local inventory = AshitaCore:GetMemoryManager():GetInventory()
+            expect(inventory ~= nil, 'GetInventory returned nil')
+
+            local populated = 0
+            for slot = 0, 15 do
+                local entry = inventory:GetEquippedItem(slot)
+                expect(entry ~= nil,
+                    'GetEquippedItem(' .. slot .. ') returned nil')
+                if entry.Index ~= 0 then
+                    populated = populated + 1
+                end
+            end
+            return populated .. '/16 slots populated'
+        end },
+
+        { name = 'equipment_item_ids', fn = function()
+            local equipment = {}
+            local inventory = AshitaCore:GetMemoryManager():GetInventory()
+            local resolved = 0
+            for slot = 0, 15 do
+                local entry = inventory:GetEquippedItem(slot)
+                if entry and entry.Index ~= 0 then
+                    local container = math.floor(entry.Index / 256)
+                    local index = entry.Index % 256
+                    local item = inventory:GetContainerItem(container, index)
+                    expect(item ~= nil, ('GetContainerItem(%d, %d) nil')
+                        :format(container, index))
+                    if item.Id and item.Id > 0 then
+                        resolved = resolved + 1
+                    end
+                end
+            end
+            return resolved .. ' item ids resolved'
+        end },
+
+        { name = 'target_manager', fn = function()
+            local target = AshitaCore:GetMemoryManager():GetTarget()
+            expect(target ~= nil, 'GetTarget returned nil')
+            return 'target_index=' .. tostring(target:GetTargetIndex(0))
+        end },
+
+        { name = 'party_info', fn = function()
+            local party = AshitaCore:GetMemoryManager():GetParty()
+            expect(party ~= nil, 'GetParty returned nil')
+            return ('zone=%s tp=%s server_id=%s'):format(
+                tostring(party:GetMemberZone(0)),
+                tostring(party:GetMemberTP(0)),
+                tostring(party:GetMemberServerId(0)))
+        end },
+
+        { name = 'player_buffs', fn = function()
+            local buffs = AshitaCore:GetMemoryManager():GetPlayer()
+                :GetBuffs()
+            expect(buffs ~= nil, 'GetBuffs returned nil')
+            return 'readable'
+        end },
+
+        { name = 'packet_0x061_received', fn = function()
+            expect(player.state.char_stats ~= nil,
+                'no 0x061 parsed yet - change jobs or zone to trigger')
+            return 'lv' .. player.state.char_stats.main_level
+        end },
+
+        { name = 'packet_0x062_received', fn = function()
+            expect(player.state.skills ~= nil,
+                'no 0x062 parsed yet - change jobs or zone to trigger')
+            return 'skills parsed'
+        end },
+
+        { name = 'data_weaponskills', fn = function()
+            expect(data.ws ~= nil, 'data/weaponskills.lua not loaded')
+            local count = 0
+            for _ in pairs(data.ws) do count = count + 1 end
+            return count .. ' weapon skills'
+        end },
+
+        { name = 'data_items', fn = function()
+            expect(data.items ~= nil, 'data/items.lua not loaded')
+            return 'loaded'
+        end },
+
+        { name = 'data_mobs', fn = function()
+            expect(mob_index ~= nil or data.mobs ~= nil,
+                'neither split index nor monolithic mobs loaded')
+            if mob_index then
+                return ('split: %d entries indexed'):format(
+                    mob_index.total_entries or -1)
+            end
+            return 'monolithic'
+        end },
+
+        { name = 'zone_mob_load', fn = function()
+            local zone = AshitaCore:GetMemoryManager():GetParty()
+                :GetMemberZone(0)
+            local mobs = mobs_for_zone(zone)
+            expect(mobs ~= nil,
+                'no mob table for current zone ' .. tostring(zone))
+            local count = 0
+            for _ in pairs(mobs[zone] or {}) do count = count + 1 end
+            return ('zone %d: %d mob names'):format(zone, count)
+        end },
+    }
+
+    local report = selftest.run(checks)
+
+    local file = io.open(addon_path .. 'whetstone_selftest.log', 'w')
+    if file then
+        file:write(table.concat(report.lines, '\n'), '\n')
+        file:close()
+    end
+
+    print(('[whetstone] selftest: %d ok, %d failed -> '
+        .. 'whetstone_selftest.log'):format(report.ok, report.failed))
 end
 
 ashita.events.register('packet_in', 'whetstone_swing_packet',

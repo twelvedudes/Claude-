@@ -478,6 +478,36 @@ describe('evaluate', function()
         assert.is_nil(found.quest_strike)
     end)
 
+    it('emits a crit tier line when a dDEX tier is reachable', function()
+        -- PLAYER dex 70 vs worst-AGI candidate (B, agi 30): dDEX 40 -
+        -- inside the per-point band, so next tier is +1 DEX
+        local report = evaluate()
+        local crit_line
+
+        for _, line in ipairs(report.lines) do
+            if line.kind == 'crit' then
+                crit_line = line
+            end
+        end
+
+        assert.is_not_nil(crit_line)
+        assert.is_true(crit_line.delta > 0)
+        assert.is_true(crit_line.text:find('%+1 DEX') ~= nil)
+    end)
+
+    it('suppresses the crit line at the dDEX cap', function()
+        local player = {}
+        for key, value in pairs(PLAYER) do
+            player[key] = value
+        end
+        player.stats = { str = 80, dex = 200, vit = 60, agi = 50,
+                         int = 40, mnd = 40, chr = 40 }
+
+        for _, line in ipairs(evaluate({ player = player }).lines) do
+            assert.is_true(line.kind ~= 'crit')
+        end
+    end)
+
     it('sorts lines by delta, informational lines last', function()
         local report = evaluate()
         local seen_nil = false

@@ -220,7 +220,7 @@ stat bonuses), buff classification, gear aggregation, and the
 
 ```sh
 python3 Whetstone/tools/extract_mobs.py  --server /path/to/Phoenix \
-    --out Whetstone/data/mobs.lua         --source-label "phoenixffxi/Phoenix @ <commit>"
+    --out Whetstone/data/mobs --split     --source-label "phoenixffxi/Phoenix @ <commit>"
 python3 Whetstone/tools/extract_ws.py    --server /path/to/Phoenix \
     --out Whetstone/data/weaponskills.lua --source-label "phoenixffxi/Phoenix @ <commit>"
 python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
@@ -229,6 +229,44 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
+
+## Phase 6: pre-beta hardening
+
+- **Crit rate model completed**: the C++ auto-attack path
+  (`GetCritHitRate`/`GetDexCritBonus`) was verified tier-identical to
+  the Lua WS path already implemented; the one divergence - melee
+  clamps to [0%, 100%] while WS clamps to [5%, 100%] - is modeled via
+  `crit_rate{ kind = 'melee' | 'ws' }`. `crit_info` reports DEX
+  distance to the next dDEX tier and the advisor emits a ranked
+  `+N DEX -> +1% crit` line when a tier is reachable (suppressed at
+  the +15% cap). Module sweep found no crit overrides.
+- **32-bit memory**: `extract_mobs.py --split` writes one file per
+  zone plus `data/mobs/index.lua`; the addon loads only the current
+  zone's table on demand and unloads the previous one
+  (`package.loaded` clear + `collectgarbage`), logging the Lua heap
+  before/after in debug mode. Conservation balances ACROSS the split:
+  per-zone sums are asserted against extraction accounting at
+  generation time, and a deliberate row-loss test proves the check
+  fires.
+- **Experiment tooling**: `/whet debug` now opens with a full
+  session-state header (stats, parsed skills + capped flags, per-piece
+  gear haste, buff classification with warnings for food and any
+  unaccounted effect IDs, target pin state); swing lines carry
+  `base=`/`spike=` so pDIF is reconstructable per swing;
+  `--singletons-out` lists exact-stat validation targets (minLevel ==
+  maxLevel mobs in the starting zones - 145 on Phoenix); and
+  `tools/analyze_swings.py` turns a log into per-checklist verdicts
+  (HIT_CEILING with Wilson 95% CI separating the 95-vs-99 question,
+  PDIF_BOUNDS, SPIKE frequency, WS_MEAN with an explicit
+  Adoulin-alpha-pattern detector) - each PASS / FAIL /
+  INSUFFICIENT_DATA with swing counts.
+- **Release**: `tools/package_release.py` builds
+  `whetstone-v<ver>-beta.zip` (addon + all generated tables +
+  regeneration instructions) and REFUSES to package without the data
+  tables. `/whet selftest` exercises every Ashita glue call
+  (inventory slots, item id resolution, target/party/buffs, packet
+  state, data tables, zone mob load) and writes
+  `whetstone_selftest.log` so shakedown failures name the exact call.
 
 ## Phase 5: real accuracy, WS gating, swing logging
 
@@ -333,9 +371,12 @@ lua5.1 Whetstone/tests/test_formulas.lua       # or: busted ...
 lua5.1 Whetstone/tests/test_player.lua
 lua5.1 Whetstone/tests/test_advisor.lua
 lua5.1 Whetstone/tests/test_swinglog.lua
+lua5.1 Whetstone/tests/test_selftest.lua
 python3 Whetstone/tools/test_extract_mobs.py
 python3 Whetstone/tools/test_extract_ws.py
 python3 Whetstone/tools/test_extract_items.py
+python3 Whetstone/tools/test_analyze_swings.py
+python3 Whetstone/tools/test_package_release.py
 ```
 
 Every expected value in these suites is hand-derived from the server

@@ -818,8 +818,12 @@ function M.wsc(stats, mods)
     return total
 end
 
--- Crit rate bonus from dDEX.
--- physical_utilities.lua: criticalRateFromStatDiff
+-- Crit rate bonus from dDEX. The C++ auto-attack path
+-- (battleutils.cpp GetDexCritBonus) and the Lua WS path
+-- (physical_utilities.lua criticalRateFromStatDiff) use the SAME tier
+-- curve: 0-6 +0, 7-13 +1, 14-19 +2, 20-29 +3, 30-39 +4, 40-50 dDEX-35,
+-- hard cap +15 (dDEX clamped to 50). Verified line-by-line on Phoenix;
+-- no enabled module overrides either path.
 function M.crit_rate_from_dex(dex, target_agi)
     local diff = dex - target_agi
 
@@ -840,14 +844,52 @@ function M.crit_rate_from_dex(dex, target_agi)
     return 0
 end
 
--- Swing crit rate (base 5% + dDEX + flat bonuses), clamped to [5%, 100%].
+-- Swing crit rate (base 5% + dDEX + flat bonuses).
+--
+-- Floor divergence between the two server paths (both replicated):
+--   kind = 'ws'    (default) Lua calculateSwingCriticalRate:
+--                  clamp [0.05, 1] - WS crit never drops below 5%
+--   kind = 'melee' C++ GetCritHitRate: clamp [0, 1] - auto-attack
+--                  crit CAN be pushed below 5% by Yonin / Enemy Crit
+--                  Rate merits / CRITICAL_HIT_EVASION
 function M.crit_rate(p)
     local rate = 0.05
         + M.crit_rate_from_dex(p.dex or 0, p.target_agi or 0)
         + (p.bonus or 0)
         + M.tp_factor(p.tp or 0, p.crit_varies)
 
-    return clamp(rate, 0.05, 1)
+    local floor_value = (p.kind == 'melee') and 0 or 0.05
+
+    return clamp(rate, floor_value, 1)
+end
+
+-- Advisor helper: where am I on the dDEX crit curve and how many DEX
+-- points to the next tier? Mirrors fstr_info.
+-- Returns { bonus, at_cap, dex_to_next, next_bonus }
+function M.crit_info(dex, target_agi)
+    local current = M.crit_rate_from_dex(dex, target_agi)
+    local diff = dex - target_agi
+
+    -- The curve is flat past dDEX 50 (+15%).
+    if diff >= 50 then
+        return { bonus = current, at_cap = true }
+    end
+
+    for add = 1, 50 - diff do
+        local candidate = M.crit_rate_from_dex(dex + add, target_agi)
+
+        if candidate > current then
+            return
+            {
+                bonus       = current,
+                at_cap      = false,
+                dex_to_next = add,
+                next_bonus  = candidate,
+            }
+        end
+    end
+
+    return { bonus = current, at_cap = true }
 end
 
 -- =====================================================================

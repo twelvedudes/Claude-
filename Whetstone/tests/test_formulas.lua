@@ -760,6 +760,41 @@ describe('crit rate', function()
         assert.near(0.05, F.crit_rate({ dex = 10, target_agi = 100, bonus = -0.5 }), 1e-12)
     end)
 
+    it('floors at 0 for the melee path but 5% for the WS path', function()
+        -- C++ GetCritHitRate clamps [0,100]; Lua
+        -- calculateSwingCriticalRate clamps [0.05, 1]. A -10% flat
+        -- penalty (Yonin/Enemy Crit merits) drives them apart.
+        local p = { dex = 10, target_agi = 100, bonus = -0.10 }
+
+        assert.near(0.05, F.crit_rate(p), 1e-12) -- ws default
+        p.kind = 'melee'
+        assert.near(0, F.crit_rate(p), 1e-12)
+    end)
+
+    it('caps the dDEX bonus at +15% (dDEX clamped to 50)', function()
+        -- GetDexCritBonus: std::min(critRate, 15) after dDEX clamp
+        assert.near(0.15, F.crit_rate_from_dex(200, 60), 1e-12)
+    end)
+
+    it('reports DEX distance to the next crit tier', function()
+        -- dDEX 17 (+2 tier): next tier at dDEX 20 -> 3 DEX away
+        local info = F.crit_info(77, 60)
+
+        assert.near(0.02, info.bonus, 1e-12)
+        assert.is_false(info.at_cap)
+        assert.are.equal(3, info.dex_to_next)
+        assert.near(0.03, info.next_bonus, 1e-12)
+
+        -- dDEX 45: inside the per-point band, next tier is +1 DEX
+        local band = F.crit_info(105, 60)
+
+        assert.near(0.10, band.bonus, 1e-12)
+        assert.are.equal(1, band.dex_to_next)
+
+        -- dDEX 50+: capped
+        assert.is_true(F.crit_info(110, 60).at_cap)
+    end)
+
     it('adds the crit-varies TP factor', function()
         local rate = F.crit_rate(
         {

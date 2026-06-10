@@ -56,7 +56,8 @@ Adjacent but out of the damage model (documented, not modeled):
 | `alpha` | `scripts/globals/weaponskills.lua` `calculateRawWSDmg` (legacy branch) | none — but see alpha caveat in README (deployed `USE_ADOULIN_WEAPON_SKILL_CHANGES` not in repo) |
 | `ftp`, `tp_factor` | `weaponskills.lua` `fTP`; `physical_utilities.lua` `calculateTPfactor` | none |
 | `wsc` | `physical_utilities.lua` `calculateWSC` | none |
-| `crit_rate`, `crit_rate_from_dex` | `physical_utilities.lua` `calculateSwingCriticalRate`/`criticalRateFromStatDiff` | none |
+| `crit_rate` (kind='ws', 5% floor), `crit_rate_from_dex`, `crit_info` | `physical_utilities.lua` `calculateSwingCriticalRate`/`criticalRateFromStatDiff` | none |
+| `crit_rate` (kind='melee', 0 floor) | `battleutils.cpp` `GetCritHitRate`/`GetDexCritBonus` — dDEX tier curve verified IDENTICAL to the Lua WS path (0-6 +0, 7-13 +1, 14-19 +2, 20-29 +3, 30-39 +4, 40-50 dDEX−35, cap +15); only the clamp floor differs (C++ [0,100] vs Lua [5,100]) | none (swept; rov's crit hit is a WS `critVaries` param, handled by the WS extractor) |
 | `ws_damage` | `weaponskills.lua` `doPhysicalWeaponskill`/`calculateRawWSDmg`/`getSingleHitDamage` | WS *parameters* via `modules/wotg/lua/weaponskills/*` (extracted, not formula changes) |
 | `melee_swing` | composition of the above | — |
 
