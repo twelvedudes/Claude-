@@ -157,7 +157,7 @@ class ExtractionTests(unittest.TestCase):
         root = Path(cls.tmp.name)
         build_fixture(root)
         cls.data = X.ServerData(root)
-        cls.mobs = X.extract(cls.data)
+        cls.mobs, cls.accounting = X.extract(cls.data)
 
     @classmethod
     def tearDownClass(cls):

@@ -63,7 +63,7 @@ class ExtractItemsTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.root = Path(cls.tmp.name)
         build_fixture(cls.root)
-        cls.items = X.extract(cls.root)
+        cls.items, cls.accounting = X.extract(cls.root)
 
     @classmethod
     def tearDownClass(cls):
@@ -90,7 +90,7 @@ class ExtractItemsTests(unittest.TestCase):
         self.assertNotIn('mod311', self.items[17559]['mods'])
 
     def test_all_mods_flag_keeps_everything(self):
-        items = X.extract(self.root, all_mods=True)
+        items, _ = X.extract(self.root, all_mods=True)
 
         self.assertEqual(10, items[17559]['mods']['mod311'])
 

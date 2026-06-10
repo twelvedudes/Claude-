@@ -179,10 +179,10 @@ end)
 -- =====================================================================
 describe('haste from buffs', function()
     it('sums magic haste per buff instance and flags it estimated', function()
-        -- Haste + double March: 0.15 + 0.125 + 0.125
+        -- Haste (0.1465 exact-by-source) + double March (estimated)
         local h = P.haste_from_buffs({ 33, 214, 214 })
 
-        assert.near(0.40, h.magic, 1e-12)
+        assert.near(0.3965, h.magic, 1e-12)
         assert.is_true(h.estimated)
         assert.are.equal(3, #h.sources)
     end)
@@ -206,7 +206,21 @@ describe('haste from buffs', function()
     it('counts slows as negative magic haste', function()
         local h = P.haste_from_buffs({ 33, 13 })
 
-        assert.near(0, h.magic, 1e-12) -- 0.15 - 0.15
+        assert.near(0, h.magic, 1e-12) -- 0.1465 - 0.1465
+    end)
+
+    it('treats Haste alone as exact (power fixed at skill cap in source)', function()
+        local h = P.haste_from_buffs({ 33 })
+
+        assert.near(0.1465, h.magic, 1e-12)
+        assert.is_false(h.estimated)
+    end)
+
+    it('treats merit-dependent Last Resort as estimated 2H haste', function()
+        local h = P.haste_from_buffs({ 64 })
+
+        assert.near(0.25, h.two_hand_ability, 1e-12)
+        assert.is_true(h.estimated)
     end)
 
     it('honors user-configured magnitudes and clears the estimate flag', function()
@@ -280,14 +294,14 @@ describe('haste report integration', function()
     it('combines estimated magic with exact gear through formulas.haste', function()
         local report = P.haste_report(
         {
-            buffs      = { 33, 214, 214, 353 }, -- 40% magic + Hasso
+            buffs      = { 33, 214, 214, 353 }, -- 39.65% magic + Hasso
             equipment  = { [10] = 15457, [6] = 12701 }, -- 7% gear
             item_db    = ITEM_DB,
             two_handed = true,
         }, F)
 
-        -- magic 0.40 (clamped under 0.4375), ability 0.10, gear 0.07
-        assert.near(1 - 0.40 - 0.10 - 0.07, report.multiplier, 1e-12)
+        -- magic 0.3965 (under the 0.4375 cap), ability 0.10, gear 0.07
+        assert.near(1 - 0.3965 - 0.10 - 0.07, report.multiplier, 1e-12)
         assert.is_true(report.magic_estimated)
         assert.is_true(report.gear_exact)
     end)

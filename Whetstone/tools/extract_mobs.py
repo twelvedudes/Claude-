@@ -258,6 +258,193 @@ INSERT_RE = re.compile(
     r"INSERT INTO `?(\w+)`?\s+VALUES\s*\((.*)\);\s*(?:--.*)?$",
     re.IGNORECASE)
 
+# Independent of INSERT_RE on purpose: this only looks at the statement
+# PREFIX, so any tail format the full regex chokes on (trailing
+# comments, multi-line statements, ...) produces a count mismatch and a
+# loud ConservationError instead of silently dropped rows.
+INSERT_PREFIX_RE = re.compile(r"INSERT INTO `?(\w+)`?", re.IGNORECASE)
+
+
+class ConservationError(RuntimeError):
+    """Rows were encountered but neither parsed nor explicitly skipped."""
+
+
+def count_insert_lines(path: Path, table: str) -> int:
+    """Prefix-only count of INSERT statements for `table` in a dump."""
+    count = 0
+
+    with path.open(encoding='utf-8', errors='replace') as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped.upper().startswith('INSERT INTO'):
+                match = INSERT_PREFIX_RE.match(stripped)
+                if match and match.group(1) == table:
+                    count += 1
+
+    return count
+
+
+def parse_sql_rows_checked(path: Path, table: str) -> list:
+    """parse_sql_rows + conservation check.
+
+    Every INSERT line for `table` (counted by prefix only) must be
+    parsed by the full-line regex; a mismatch means the dump uses a
+    format the parser doesn't understand, and that must never be
+    silent again.
+    """
+    rows = list(parse_sql_rows(path, table))
+    expected = count_insert_lines(path, table)
+
+    if len(rows) != expected:
+        raise ConservationError(
+            '%s: %d INSERT lines for `%s` but only %d parsed - '
+            'parser does not understand this dump format'
+            % (path, expected, table, len(rows)))
+
+    return rows
+
+
+# ---------------------------------------------------------------------
+# Enabled-module SQL (modules/init.txt)
+# ---------------------------------------------------------------------
+
+
+def enabled_module_sql_files(server_root: Path) -> list:
+    """All *.sql files belonging to modules enabled in modules/init.txt."""
+    init_path = Path(server_root) / 'modules' / 'init.txt'
+
+    if not init_path.exists():
+        return []
+
+    files = []
+
+    for raw_line in init_path.read_text(encoding='utf-8',
+                                        errors='replace').splitlines():
+        entry = raw_line.split('#', 1)[0].strip().rstrip('/')
+        if not entry:
+            continue
+
+        path = Path(server_root) / 'modules' / entry
+
+        if path.is_dir():
+            files.extend(sorted(path.rglob('*.sql')))
+        elif path.suffix == '.sql' and path.exists():
+            files.append(path)
+
+    return files
+
+
+UPDATE_RE = re.compile(
+    r"UPDATE\s+`?(\w+)`?\s+SET\s+(.+?)\s+WHERE\s+(.+)",
+    re.IGNORECASE | re.DOTALL)
+SET_PAIR_RE = re.compile(r"`?(\w+)`?\s*=\s*('[^']*'|-?\d+)")
+WHERE_EQ_RE = re.compile(r"^`?(\w+)`?\s*=\s*('[^']*'|-?\d+)$")
+WHERE_IN_RE = re.compile(r"^`?(\w+)`?\s+IN\s*\((.+)\)$",
+                         re.IGNORECASE | re.DOTALL)
+
+
+def _sql_literal(token: str):
+    token = token.strip()
+
+    if token.startswith("'"):
+        return token[1:-1]
+
+    return int(token)
+
+
+def parse_module_updates(path: Path, tables=None) -> list:
+    """Parse UPDATE statements from a module SQL file.
+
+    Handles the forms Phoenix's enabled modules actually use:
+        UPDATE t SET a = 1, b = 'x' WHERE name = 'y' [AND col = z];
+        UPDATE t SET a = 1 WHERE name IN ('x', 'y', ...);
+    Returns dicts: { table, sets {col: value}, where {col: [values]} }
+
+    When `tables` is given, only statements targeting those tables are
+    returned - and for THOSE, an unparseable statement raises
+    ConservationError (an update to a consumed table must never be
+    silently ignored). Statements for other tables are skipped freely.
+    """
+    text = path.read_text(encoding='utf-8', errors='replace')
+    # strip line comments, then split statements
+    text = re.sub(r'--[^\n]*', '', text)
+
+    updates = []
+
+    for statement in text.split(';'):
+        statement = statement.strip()
+        if not statement.upper().startswith('UPDATE'):
+            continue
+
+        prefix = re.match(r"UPDATE\s+`?(\w+)`?", statement, re.IGNORECASE)
+        if tables is not None and (not prefix
+                                   or prefix.group(1) not in tables):
+            continue
+
+        match = UPDATE_RE.match(statement)
+        if not match:
+            raise ConservationError(
+                '%s: unsupported UPDATE form: %.120s' % (path, statement))
+
+        table, set_clause, where_clause = match.groups()
+
+        sets = {column: _sql_literal(value)
+                for column, value in SET_PAIR_RE.findall(set_clause)}
+
+        # WHERE is parsed best-effort: an unsupported form (LIKE etc.)
+        # yields where = None. Callers MUST treat (consumed SET column +
+        # where None) as a ConservationError; updates whose SET columns
+        # are not consumed may ignore the WHERE entirely.
+        where = {}
+        for condition in re.split(r'\bAND\b', where_clause,
+                                  flags=re.IGNORECASE):
+            condition = condition.strip()
+
+            eq_match = WHERE_EQ_RE.match(condition)
+            in_match = WHERE_IN_RE.match(condition)
+
+            if eq_match:
+                where[eq_match.group(1)] = [_sql_literal(eq_match.group(2))]
+            elif in_match:
+                values = [_sql_literal(token) for token
+                          in in_match.group(2).replace('"', "'").split(',')]
+                where[in_match.group(1)] = values
+            else:
+                where = None
+                break
+
+        updates.append({'table': table, 'sets': sets, 'where': where,
+                        'source': str(path)})
+
+    return updates
+
+
+def collect_module_sql(server_root: Path, tables) -> tuple:
+    """Gather INSERT rows and UPDATE statements for `tables` from every
+    enabled module SQL file.
+
+    Returns (inserts: {table: [rows]}, updates: [update dicts]).
+    UPDATE parsing failures only matter for consumed tables - files
+    that contain no statements touching `tables` are skipped wholesale.
+    """
+    inserts = defaultdict(list)
+    updates = []
+
+    for path in enabled_module_sql_files(server_root):
+        text = path.read_text(encoding='utf-8', errors='replace')
+
+        touched = [table for table in tables
+                   if re.search(r"\b%s\b" % table, text)]
+        if not touched:
+            continue
+
+        for table in touched:
+            inserts[table].extend(parse_sql_rows_checked(path, table))
+
+        updates.extend(parse_module_updates(path, set(tables)))
+
+    return inserts, updates
+
 
 def split_values(raw: str) -> list:
     """Split a VALUES(...) body into python values.
@@ -354,16 +541,78 @@ def parse_zone_ids(zone_h: Path) -> dict:
 # ---------------------------------------------------------------------
 
 class ServerData:
-    """All tables needed for the stat calculation, loaded from a checkout."""
+    """All tables needed for the stat calculation, loaded from a checkout.
 
-    def __init__(self, root: Path):
+    Reads the base sql/ dumps AND any enabled module SQL
+    (modules/init.txt): Phoenix ships e.g. all Dynamis spawns in
+    modules/phoenix/dynamis/sql/dyna_spawn.sql. Module UPDATE
+    statements touching columns we consume raise ConservationError;
+    updates limited to columns we do not consume (spawntype etc.) are
+    counted and ignored.
+    """
+
+    TABLES = (
+        'mob_species_system', 'mob_pools', 'mob_groups',
+        'mob_spawn_points', 'mob_pool_mods', 'mob_species_mods',
+        'skill_ranks', 'traits',
+    )
+
+    CONSUMED_COLUMNS = {
+        'mob_species_system': {'speciesID', 'VIT', 'AGI', 'DEF', 'family'},
+        'mob_pools': {'poolid', 'speciesid', 'mJob', 'sJob', 'mobType'},
+        'mob_groups': {'groupid', 'poolid', 'zoneid'},
+        'mob_spawn_points': {'mobid', 'mobname', 'groupid',
+                             'minLevel', 'maxLevel'},
+        'mob_pool_mods': {'poolid', 'modid', 'value', 'is_mob_mod'},
+        'mob_species_mods': {'speciesid', 'modid', 'value', 'is_mob_mod'},
+        'skill_ranks': {'skillid', 'name', 'war', 'mnk', 'whm', 'blm',
+                        'rdm', 'thf', 'pld', 'drk', 'bst', 'brd', 'rng',
+                        'sam', 'nin', 'drg', 'smn', 'blu', 'cor', 'pup',
+                        'dnc', 'sch', 'geo', 'run'},
+        'traits': {'traitid', 'job', 'level', 'rank', 'modifier', 'value'},
+    }
+
+    def __init__(self, root: Path, include_modules: bool = True):
         self.root = Path(root)
         sql = self.root / 'sql'
 
+        module_inserts, module_updates = ({}, [])
+        if include_modules:
+            module_inserts, module_updates = collect_module_sql(
+                self.root, self.TABLES)
+
+        self.ignored_updates = 0
+        self.applied_updates = 0
+        trait_updates = []
+
+        for update in module_updates:
+            touched = (set(update['sets'])
+                       & self.CONSUMED_COLUMNS[update['table']])
+
+            if not touched:
+                self.ignored_updates += 1
+                continue
+
+            # traits and skill_ranks are the consumed tables Phoenix's
+            # enabled modules UPDATE today; both applied row-wise below.
+            if (update['table'] in ('traits', 'skill_ranks')
+                    and update['where'] is not None):
+                trait_updates.append(update)
+                continue
+
+            raise ConservationError(
+                '%s: module UPDATE on %s touches consumed columns %s '
+                '- extractor must be taught to apply it'
+                % (update['source'], update['table'], sorted(touched)))
+
+        def rows(table):
+            result = parse_sql_rows_checked(sql / (table + '.sql'), table)
+            result.extend(module_inserts.get(table, []))
+            return result
+
         # speciesID -> dict of ranks
         self.species = {}
-        for row in parse_sql_rows(sql / 'mob_species_system.sql',
-                                  'mob_species_system'):
+        for row in rows('mob_species_system'):
             self.species[row[0]] = {
                 'family': row[3],
                 'vit_rank': row[11],
@@ -373,7 +622,7 @@ class ServerData:
 
         # poolid -> pool info
         self.pools = {}
-        for row in parse_sql_rows(sql / 'mob_pools.sql', 'mob_pools'):
+        for row in rows('mob_pools'):
             self.pools[row[0]] = {
                 'name': row[1],
                 'species': row[3],
@@ -384,20 +633,24 @@ class ServerData:
 
         # (zoneid, groupid) -> poolid
         self.groups = {}
-        for row in parse_sql_rows(sql / 'mob_groups.sql', 'mob_groups'):
+        for row in rows('mob_groups'):
             self.groups[(row[2], row[0])] = row[1]
 
-        # spawn points: (zone, name, groupid) -> (minLevel, maxLevel)
-        self.spawns = {}
-        for row in parse_sql_rows(sql / 'mob_spawn_points.sql',
-                                  'mob_spawn_points'):
+        # spawn point rows (kept raw for conservation accounting)
+        self.spawn_rows = []
+        for row in rows('mob_spawn_points'):
             mobid, _, mobname, _, groupid, min_lvl, max_lvl = row[:7]
-            zone = (mobid >> 12) & 0xFFF
-            self.spawns[(zone, mobname, groupid)] = (min_lvl, max_lvl)
+            self.spawn_rows.append({
+                'zone': (mobid >> 12) & 0xFFF,
+                'name': mobname,
+                'group': groupid,
+                'min_level': min_lvl,
+                'max_level': max_lvl,
+            })
 
         # flat DEF/EVA mods
         self.pool_mods = defaultdict(lambda: {'def': 0, 'eva': 0})
-        for row in parse_sql_rows(sql / 'mob_pool_mods.sql', 'mob_pool_mods'):
+        for row in rows('mob_pool_mods'):
             poolid, modid, value, is_mob_mod = row[:4]
             if not is_mob_mod:
                 if modid == MOD_DEF:
@@ -406,8 +659,7 @@ class ServerData:
                     self.pool_mods[poolid]['eva'] += value
 
         self.species_mods = defaultdict(lambda: {'def': 0, 'eva': 0})
-        for row in parse_sql_rows(sql / 'mob_species_mods.sql',
-                                  'mob_species_mods'):
+        for row in rows('mob_species_mods'):
             speciesid, modid, value, is_mob_mod = row[:4]
             if not is_mob_mod:
                 if modid == MOD_DEF:
@@ -416,22 +668,65 @@ class ServerData:
                     self.species_mods[speciesid]['eva'] += value
 
         # per-job evasion skill rank (skill_ranks row 'evasion';
-        # job columns follow the JOBTYPE enum order, WAR..RUN)
-        self.evasion_rank = {0: 11}  # NON: worse than every real rank
-        for row in parse_sql_rows(sql / 'skill_ranks.sql', 'skill_ranks'):
-            if str(row[1]).lower() == 'evasion':
-                for job in range(1, min(23, len(row) - 1)):
-                    self.evasion_rank[job] = row[1 + job]
+        # job columns follow the JOBTYPE enum order, WAR..RUN).
+        # Loaded as named rows so module UPDATEs (pre_2014_skill_ranks)
+        # can be applied row-wise before the evasion row is read.
+        skill_rank_columns = [
+            'skillid', 'name', 'war', 'mnk', 'whm', 'blm', 'rdm', 'thf',
+            'pld', 'drk', 'bst', 'brd', 'rng', 'sam', 'nin', 'drg',
+            'smn', 'blu', 'cor', 'pup', 'dnc', 'sch', 'geo', 'run',
+        ]
 
-        # traits: job -> traitid -> [(level, rank, modifier, value)]
+        skill_rank_rows = []
+        for row in rows('skill_ranks'):
+            skill_rank_rows.append(
+                dict(zip(skill_rank_columns, row[:len(skill_rank_columns)])))
+
+        for update in trait_updates:
+            if update['table'] != 'skill_ranks':
+                continue
+            for rank_row in skill_rank_rows:
+                if all(rank_row.get(column) in values
+                       for column, values in update['where'].items()):
+                    for column, value in update['sets'].items():
+                        if column in rank_row:
+                            rank_row[column] = value
+                    self.applied_updates += 1
+
+        self.evasion_rank = {0: 11}  # NON: worse than every real rank
+        for rank_row in skill_rank_rows:
+            if str(rank_row['name']).lower() == 'evasion':
+                for job in range(1, 23):
+                    self.evasion_rank[job] = rank_row[skill_rank_columns[1 + job]]
+
+        # traits: load as named rows, apply module UPDATEs row-wise,
+        # then index job -> traitid -> [(level, rank, modifier, value)]
         self.traits = defaultdict(lambda: defaultdict(list))
-        traits_path = sql / 'traits.sql'
-        if traits_path.exists():
-            for row in parse_sql_rows(traits_path, 'traits'):
-                traitid, _, job, level, rank, modifier, value = row[:7]
-                if modifier in (MOD_DEF, MOD_EVA):
-                    self.traits[job][traitid].append(
-                        (level, rank, modifier, value))
+        if (sql / 'traits.sql').exists():
+            trait_rows = []
+            for row in rows('traits'):
+                trait_rows.append({
+                    'traitid': row[0], 'name': row[1], 'job': row[2],
+                    'level': row[3], 'rank': row[4], 'modifier': row[5],
+                    'value': row[6],
+                })
+
+            for update in trait_updates:
+                if update['table'] != 'traits':
+                    continue
+                for trait_row in trait_rows:
+                    if all(trait_row.get(column) in values
+                           for column, values in update['where'].items()):
+                        for column, value in update['sets'].items():
+                            if column in trait_row:
+                                trait_row[column] = value
+                        self.applied_updates += 1
+
+            for trait_row in trait_rows:
+                if trait_row['modifier'] in (MOD_DEF, MOD_EVA):
+                    self.traits[trait_row['job']][trait_row['traitid']].append(
+                        (trait_row['level'], trait_row['rank'],
+                         trait_row['modifier'], trait_row['value']))
 
         # subjob zone ids from zone.h
         zone_ids = parse_zone_ids(self.root / 'src' / 'map' / 'zone.h')
@@ -513,46 +808,87 @@ class ServerData:
 # ---------------------------------------------------------------------
 
 
-def extract(data: ServerData, zones=None) -> dict:
-    """zone -> display name -> [entry, ...], min/max stats per entry."""
+def extract(data: ServerData, zones=None) -> tuple:
+    """zone -> display name -> [entry, ...], min/max stats per entry.
+
+    Returns (output, accounting). Every spawn row is either emitted or
+    counted under an explicit skip reason; any imbalance raises
+    ConservationError so silent row loss is impossible.
+    """
     output = defaultdict(dict)
     seen = set()
 
-    for (zone, mobname, groupid), (min_lvl, max_lvl) in sorted(
-            data.spawns.items()):
+    accounting = {
+        'total': len(data.spawn_rows),
+        'emitted': 0,
+        'duplicate_spawn_point': 0,
+        'zone_filtered': 0,
+        'zero_level': 0,
+        'missing_group': 0,
+        'missing_pool': 0,
+        'missing_species': 0,
+    }
+
+    def sort_key(row):
+        return (row['zone'], row['name'], row['group'],
+                row['min_level'], row['max_level'])
+
+    for row in sorted(data.spawn_rows, key=sort_key):
+        zone = row['zone']
+
         if zones and zone not in zones:
-            continue
-        if min_lvl == 0 and max_lvl == 0:
+            accounting['zone_filtered'] += 1
             continue
 
-        poolid = data.groups.get((zone, groupid))
-        if poolid is None or poolid not in data.pools:
+        if row['min_level'] == 0 and row['max_level'] == 0:
+            accounting['zero_level'] += 1
             continue
-        pool = data.pools[poolid]
+
+        poolid = data.groups.get((zone, row['group']))
+        if poolid is None:
+            accounting['missing_group'] += 1
+            continue
+
+        pool = data.pools.get(poolid)
+        if pool is None:
+            accounting['missing_pool'] += 1
+            continue
+
         if pool['species'] not in data.species:
+            accounting['missing_species'] += 1
             continue
 
-        key = (zone, mobname, min_lvl, max_lvl, poolid)
+        key = (zone, row['name'], row['min_level'], row['max_level'], poolid)
         if key in seen:
+            accounting['duplicate_spawn_point'] += 1
             continue
         seen.add(key)
 
-        display = mobname.replace('_', ' ')
+        accounting['emitted'] += 1
+
         entry = {
-            'group': groupid,
+            'group': row['group'],
             'pool': poolid,
-            'min_level': min_lvl,
-            'max_level': max_lvl,
+            'min_level': row['min_level'],
+            'max_level': row['max_level'],
             'mjob': JOB_NAMES[pool['mjob']],
             'sjob': JOB_NAMES[pool['sjob']],
             'family': data.species[pool['species']]['family'],
             'nm': bool(pool['mob_type'] & 0x02),
-            'min': data.stats_at_level(zone, poolid, min_lvl),
-            'max': data.stats_at_level(zone, poolid, max_lvl),
+            'min': data.stats_at_level(zone, poolid, row['min_level']),
+            'max': data.stats_at_level(zone, poolid, row['max_level']),
         }
-        output[zone].setdefault(display, []).append(entry)
+        output[zone].setdefault(row['name'].replace('_', ' '),
+                                []).append(entry)
 
-    return output
+    accounted = sum(value for key, value in accounting.items()
+                    if key != 'total')
+    if accounted != accounting['total']:
+        raise ConservationError(
+            'spawn rows: %d total but only %d accounted for (%s)'
+            % (accounting['total'], accounted, accounting))
+
+    return output, accounting
 
 
 def lua_string(value: str) -> str:
@@ -611,7 +947,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     data = ServerData(Path(args.server))
-    mobs = extract(data, set(args.zone) if args.zone else None)
+    mobs, accounting = extract(data, set(args.zone) if args.zone else None)
 
     label = args.source_label or str(args.server)
     out_path = Path(args.out)
@@ -620,8 +956,10 @@ def main(argv=None) -> int:
 
     total = sum(len(entries) for zone in mobs.values()
                 for entries in zone.values())
-    print('wrote %s: %d zones, %d mob entries'
-          % (out_path, len(mobs), total))
+    print('wrote %s: %d zones, %d mob entries' % (out_path, len(mobs), total))
+    print('conservation: %s; %d module updates ignored (non-consumed columns)'
+          % (', '.join('%s=%d' % kv for kv in sorted(accounting.items())),
+             data.ignored_updates))
     return 0
 
 

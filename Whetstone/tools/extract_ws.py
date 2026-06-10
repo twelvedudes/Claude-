@@ -35,7 +35,8 @@ import re
 import sys
 from pathlib import Path
 
-from extract_mobs import parse_sql_rows
+from extract_mobs import (ConservationError, collect_module_sql,
+                          parse_sql_rows_checked)
 
 # src/common/mmo.h SKILLTYPE
 SKILL_NAMES = {
@@ -209,11 +210,14 @@ def parse_module_file(path: Path) -> dict:
     return overrides
 
 
-def parse_ws_metadata(sql_path: Path) -> dict:
-    """sql/weapon_skills.sql -> { name: meta dict }."""
+def parse_ws_metadata(sql_path: Path, extra_rows=None) -> dict:
+    """sql/weapon_skills.sql (+ module rows) -> { name: meta dict }."""
     meta = {}
 
-    for row in parse_sql_rows(sql_path, 'weapon_skills'):
+    rows = parse_sql_rows_checked(sql_path, 'weapon_skills')
+    rows.extend(extra_rows or [])
+
+    for row in rows:
         (wsid, name, jobs_blob, ws_type, skilllevel, element, _anim,
          _animtime, ws_range, aoe, _radius, primary_sc, secondary_sc,
          tertiary_sc, main_only, unlock_id) = row[:16]
@@ -246,10 +250,73 @@ def parse_ws_metadata(sql_path: Path) -> dict:
 # ---------------------------------------------------------------------
 
 
-def extract(server_root: Path) -> dict:
+# Columns of weapon_skills the emitted database depends on. A module
+# UPDATE touching any of these must be applied (or extraction fails).
+CONSUMED_COLUMNS = {
+    'weaponskillid', 'name', 'jobs', 'type', 'skilllevel', 'element',
+    'range', 'aoe', 'primary_sc', 'secondary_sc', 'tertiary_sc',
+    'main_only', 'unlock_id',
+}
+
+# SQL column -> meta dict key (for module UPDATE application)
+COLUMN_TO_META = {
+    'skilllevel': 'skill_level',
+    'element': 'element',
+    'range': 'range',
+    'aoe': 'aoe',
+    'main_only': 'main_only',
+    'unlock_id': 'unlock_id',
+}
+
+
+def apply_ws_updates(meta: dict, updates: list) -> tuple:
+    """Apply module UPDATE statements to the metadata table.
+
+    Phoenix's enabled era modules adjust weapon_skills directly
+    (wotg/tier_one_weapon_skills.sql lowers tier-1 skilllevel to 10;
+    soa/weaponskills.sql sets ranged WS range). Only `WHERE name ...`
+    forms are needed; anything else touching consumed columns raises.
+    Returns (applied_count, ignored_count).
+    """
+    applied = 0
+    ignored = 0
+
+    for update in updates:
+        touched = set(update['sets']) & CONSUMED_COLUMNS
+
+        if not touched:
+            ignored += 1
+            continue
+
+        unmapped = touched - set(COLUMN_TO_META)
+        if update['where'] is None or 'name' not in update['where'] \
+                or unmapped:
+            raise ConservationError(
+                '%s: unsupported weapon_skills UPDATE (where=%s, sets=%s)'
+                % (update['source'], update['where'],
+                   sorted(update['sets'])))
+
+        for name in update['where']['name']:
+            if name in meta:
+                for column, value in update['sets'].items():
+                    if column in COLUMN_TO_META:
+                        meta[name][COLUMN_TO_META[column]] = value
+                applied += 1
+
+    return applied, ignored
+
+
+def extract(server_root: Path) -> tuple:
+    """Returns (database, accounting)."""
     server_root = Path(server_root)
 
-    meta = parse_ws_metadata(server_root / 'sql' / 'weapon_skills.sql')
+    module_inserts, module_updates = collect_module_sql(
+        server_root, ('weapon_skills',))
+
+    meta = parse_ws_metadata(server_root / 'sql' / 'weapon_skills.sql',
+                             module_inserts.get('weapon_skills'))
+
+    applied, ignored = apply_ws_updates(meta, module_updates)
 
     upstream_dir = server_root / 'scripts' / 'actions' / 'weaponskills'
     module_dir = (server_root / 'modules' / 'wotg' / 'lua' / 'weaponskills')
@@ -261,6 +328,15 @@ def extract(server_root: Path) -> dict:
 
     database = {}
 
+    accounting = {
+        'total': len(meta),
+        'emitted': 0,
+        'no_script': 0,
+        'unparseable_script': 0,
+        'sql_updates_applied': applied,
+        'sql_updates_ignored': ignored,
+    }
+
     for name, info in meta.items():
         entry = dict(info)
 
@@ -270,9 +346,11 @@ def extract(server_root: Path) -> dict:
         else:
             script = upstream_dir / (name + '.lua')
             if not script.exists():
+                accounting['no_script'] += 1
                 continue
             parsed = parse_upstream_script(script)
             if parsed is None:
+                accounting['unparseable_script'] += 1
                 continue
             params, kind = parsed
             entry['source'] = 'base_script'
@@ -280,8 +358,16 @@ def extract(server_root: Path) -> dict:
         entry['kind'] = kind
         entry['params'] = params
         database[name] = entry
+        accounting['emitted'] += 1
 
-    return database
+    accounted = (accounting['emitted'] + accounting['no_script']
+                 + accounting['unparseable_script'])
+    if accounted != accounting['total']:
+        raise ConservationError(
+            'weapon_skills rows: %d total, %d accounted (%s)'
+            % (accounting['total'], accounted, accounting))
+
+    return database, accounting
 
 
 def emit_lua(database: dict, source: str) -> str:
@@ -331,7 +417,7 @@ def main(argv=None) -> int:
     parser.add_argument('--source-label', default=None)
     args = parser.parse_args(argv)
 
-    database = extract(Path(args.server))
+    database, accounting = extract(Path(args.server))
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -346,6 +432,8 @@ def main(argv=None) -> int:
     print('wrote %s: %d weapon skills (%s)' % (
         out_path, len(database),
         ', '.join('%s: %d' % kv for kv in sorted(by_source.items()))))
+    print('conservation: %s' % ', '.join(
+        '%s=%d' % kv for kv in sorted(accounting.items())))
     return 0
 
 

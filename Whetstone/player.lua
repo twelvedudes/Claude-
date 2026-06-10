@@ -113,14 +113,33 @@ end
 
 -- Effect IDs from Phoenix src/map/status_effect.h.
 -- amount: fraction per buff INSTANCE (March can appear twice).
+--
+-- Magnitudes audited against Phoenix source (@ 0f3f8fc):
+--   Haste  scripts/globals/spells/enhancing_spell.lua: power caps at
+--          1465/10000 (= 150/1024). The 75-era norm is a capped-skill
+--          caster, so this is EXACT-BY-SOURCE; a heavily underskilled
+--          caster lands lower (override if it ever matters).
+--   Hasso  modules/abyssea/lua/job_adjustments.lua (enabled): fixed
+--          TWOHAND_HASTE_ABILITY 1000 -> exactly 10%.
+--   Elegy  scripts/globals/spells/enfeebling_song.lua: FIXED powers,
+--          but Battlefield (2500) and Carnage (5000) share effect 194
+--          -> ambiguous from the buff ID; defaults to Carnage.
+--   Slow   white-magic Slow is dMND-scaled; Hojo: Ichi/Ni are fixed
+--          1465/1953 but all share effect 13 -> estimated.
+--   March  power = base + singing skill + instrument mods
+--          (enhancing_song.lua) -> genuinely caster-dependent.
+--   Last Resort  modules/soa/lua/job_adjustments.lua (enabled): 2H
+--          haste equal to the DRK's Desperate Blows merits; default
+--          assumes 5/5 (25%), zero without merits.
 M.BUFFS =
 {
-    [33]  = { name = 'Haste',       category = 'magic',   amount = 0.15,   estimated = true },
-    [214] = { name = 'March',       category = 'magic',   amount = 0.125,  estimated = true },
-    [13]  = { name = 'Slow',        category = 'magic',   amount = -0.15,  estimated = true },
-    [194] = { name = 'Elegy',       category = 'magic',   amount = -0.25,  estimated = true },
-    [353] = { name = 'Hasso',       category = 'ability', amount = 0.10,   estimated = false, two_hand_only = true },
-    [370] = { name = 'Haste Samba', category = 'ability', amount = 0.05,   estimated = true },
+    [33]  = { name = 'Haste',       category = 'magic',   amount = 0.1465,  estimated = false },
+    [214] = { name = 'March',       category = 'magic',   amount = 0.125,   estimated = true },
+    [13]  = { name = 'Slow',        category = 'magic',   amount = -0.1465, estimated = true },
+    [194] = { name = 'Elegy',       category = 'magic',   amount = -0.50,   estimated = true },
+    [353] = { name = 'Hasso',       category = 'ability', amount = 0.10,    estimated = false, two_hand_only = true },
+    [370] = { name = 'Haste Samba', category = 'ability', amount = 0.05,    estimated = true },
+    [64]  = { name = 'Last Resort', category = 'ability', amount = 0.25,    estimated = true,  two_hand_only = true },
 }
 
 M.BUFF_HUNDRED_FISTS = 46

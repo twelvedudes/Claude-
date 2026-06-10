@@ -914,6 +914,14 @@ function M.ws_damage(p)
         ignored_def = M.ftp(p.tp, ws.ignored_def)
     end
 
+    -- "Accuracy varies with TP" (weaponskills.lua: accMod added to
+    -- bonusAcc via the fTP interpolator).
+    local acc_varies_bonus = 0
+
+    if ws.acc_varies then
+        acc_varies_bonus = M.ftp(p.tp, ws.acc_varies)
+    end
+
     -- Crit rate: only crit-varies weapon skills can crit naturally.
     local crit_rate = 0
 
@@ -983,10 +991,10 @@ function M.ws_damage(p)
         profile          = profile,
     }
 
-    hit_params.acc_bonus = (p.bonus_acc or 0) + 100
+    hit_params.acc_bonus = (p.bonus_acc or 0) + acc_varies_bonus + 100
     local first_hit_rate = M.hit_rate(hit_params)
 
-    hit_params.acc_bonus = p.bonus_acc or 0
+    hit_params.acc_bonus = (p.bonus_acc or 0) + acc_varies_bonus
     local extra_hit_rate = M.hit_rate(hit_params)
 
     hit_params.offhand = true

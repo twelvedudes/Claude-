@@ -44,8 +44,14 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from extract_mobs import parse_sql_rows
+from extract_mobs import (ConservationError, collect_module_sql,
+                          parse_sql_rows_checked)
 from extract_ws import SKILL_NAMES
+
+# Columns the emitted database depends on; module UPDATEs touching
+# these must be applied or extraction fails loudly.
+CONSUMED_EQUIPMENT_COLUMNS = {'itemId', 'name', 'level', 'jobs', 'slot',
+                              'shieldSize'}
 
 MOD_KEYS = {
     8: 'str', 9: 'dex', 10: 'vit', 11: 'agi', 12: 'int', 13: 'mnd',
@@ -83,13 +89,23 @@ def decode_jobs(mask: int) -> list:
     return [JOB_NAMES[job] for job in range(1, 23) if mask & (1 << (job - 1))]
 
 
-def extract(server_root: Path, all_mods: bool = False) -> dict:
+def extract(server_root: Path, all_mods: bool = False) -> tuple:
+    """Returns (items, accounting)."""
     server_root = Path(server_root)
     sql = server_root / 'sql'
 
-    items = {}
+    tables = ('item_equipment', 'item_weapon', 'item_mods')
+    module_inserts, module_updates = collect_module_sql(server_root, tables)
 
-    for row in parse_sql_rows(sql / 'item_equipment.sql', 'item_equipment'):
+    def rows(table):
+        result = parse_sql_rows_checked(sql / (table + '.sql'), table)
+        result.extend(module_inserts.get(table, []))
+        return result
+
+    items = {}
+    by_name = defaultdict(list)
+
+    for row in rows('item_equipment'):
         item_id, name, level, ilevel, jobs, _mid, shield_size, \
             _script_type, slot = row[:9]
 
@@ -101,12 +117,71 @@ def extract(server_root: Path, all_mods: bool = False) -> dict:
             'shield_size': shield_size or 0,
             'mods': {},
         }
+        by_name[name].append(item_id)
 
-    for row in parse_sql_rows(sql / 'item_weapon.sql', 'item_weapon'):
+    accounting = {
+        'equipment_rows': len(items),
+        'sql_updates_applied': 0,
+        'sql_updates_ignored': 0,
+        'mods_kept': 0,
+        'mods_dropped_whitelist': 0,
+        'mods_non_equipment': 0,
+        'weapon_rows_matched': 0,
+        'weapon_rows_non_equipment': 0,
+    }
+
+    # Module UPDATEs (abyssea job_adjustments fixes pet food levels via
+    # `WHERE name = '...'`). Anything touching consumed columns that
+    # cannot be applied raises.
+    for update in module_updates:
+        if update['table'] != 'item_equipment':
+            accounting['sql_updates_ignored'] += 1
+            continue
+
+        touched = set(update['sets']) & CONSUMED_EQUIPMENT_COLUMNS
+
+        if not touched:
+            accounting['sql_updates_ignored'] += 1
+            continue
+
+        if update['where'] is None:
+            raise ConservationError(
+                '%s: unsupported item_equipment UPDATE (sets=%s)'
+                % (update['source'], sorted(update['sets'])))
+
+        targets = []
+        if 'name' in update['where']:
+            for name in update['where']['name']:
+                targets.extend(by_name.get(name, []))
+        elif 'itemId' in update['where']:
+            targets = [item_id for item_id in update['where']['itemId']
+                       if item_id in items]
+        else:
+            raise ConservationError(
+                '%s: item_equipment UPDATE with unsupported WHERE %s'
+                % (update['source'], update['where']))
+
+        for item_id in targets:
+            for column, value in update['sets'].items():
+                if column == 'level':
+                    items[item_id]['level'] = value
+                elif column == 'jobs':
+                    items[item_id]['jobs'] = value
+                elif column == 'slot':
+                    items[item_id]['slots'] = value
+                elif column == 'name':
+                    items[item_id]['name'] = value
+                elif column == 'shieldSize':
+                    items[item_id]['shield_size'] = value
+
+            accounting['sql_updates_applied'] += 1
+
+    for row in rows('item_weapon'):
         item_id, _name, skill, _subskill, _is, _ip, _im, dmg_type, hit, \
             delay, dmg = row[:11]
 
         if item_id in items:
+            accounting['weapon_rows_matched'] += 1
             items[item_id]['weapon'] = {
                 'skill': SKILL_NAMES.get(skill, 'none'),
                 'dmg': dmg,
@@ -114,25 +189,29 @@ def extract(server_root: Path, all_mods: bool = False) -> dict:
                 'dmg_type': dmg_type,
                 'hit_count': hit,
             }
+        else:
+            # ammo/"weapons" with no equipment row (fish, pebbles...)
+            accounting['weapon_rows_non_equipment'] += 1
 
-    dropped = defaultdict(int)
-
-    for row in parse_sql_rows(sql / 'item_mods.sql', 'item_mods'):
+    for row in rows('item_mods'):
         item_id, mod_id, value = row[:3]
 
         if item_id not in items:
+            accounting['mods_non_equipment'] += 1
             continue
 
         if mod_id in MOD_KEYS:
             key = MOD_KEYS[mod_id]
             items[item_id]['mods'][key] = \
                 items[item_id]['mods'].get(key, 0) + value
+            accounting['mods_kept'] += 1
         elif all_mods:
             items[item_id]['mods']['mod%d' % mod_id] = value
+            accounting['mods_kept'] += 1
         else:
-            dropped[mod_id] += 1
+            accounting['mods_dropped_whitelist'] += 1
 
-    return items
+    return items, accounting
 
 
 def emit_lua(items: dict, source: str) -> str:
@@ -183,7 +262,7 @@ def main(argv=None) -> int:
     parser.add_argument('--source-label', default=None)
     args = parser.parse_args(argv)
 
-    items = extract(Path(args.server), all_mods=args.all_mods)
+    items, accounting = extract(Path(args.server), all_mods=args.all_mods)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +276,8 @@ def main(argv=None) -> int:
 
     print('wrote %s: %d items (%d weapons, %d with gear haste)'
           % (out_path, len(items), weapons, with_haste))
+    print('conservation: %s' % ', '.join(
+        '%s=%d' % kv for kv in sorted(accounting.items())))
     return 0
 
 

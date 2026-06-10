@@ -25,8 +25,11 @@ questions a melee actually cares about:
 | `tools/test_extract_*.py` | Unit tests for each extractor | **done** |
 | `player.lua` | Char stats from packet `0x061`, equipment via Ashita inventory, haste from buff IDs + item DB | **done (Phase 3)** |
 | `tests/test_player.lua` | Unit tests for the pure parts of player.lua | **done (Phase 3)** |
-| `advisor.lua` | Combines formulas + generated data + player state into recommendations | planned (Phase 4) |
-| `ui.lua` | Compact ImGui panel | planned (Phase 4) |
+| `advisor.lua` | Ranked actionable deltas from formulas + generated data + player state | **done (Phase 4)** |
+| `tests/test_advisor.lua` | Routing guard, disambiguation, ranking tests | **done (Phase 4)** |
+| `ui.lua` | One-glance ImGui panel (renders advisor output) | **done (Phase 4, needs in-game shakedown)** |
+| `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `/whet level <n>`, `/whet march <pct>`) | **done (Phase 4, needs in-game shakedown)** |
+| `PROVENANCE.md` | Function-by-function ground-truth manifest + full enabled-module audit | **done** |
 
 > **Release packaging:** the generated tables (`data/mobs.lua`,
 > `data/weaponskills.lua`, `data/items.lua`) are **gitignored for
@@ -190,14 +193,18 @@ for debugging.
 guessed:
 
 - **Gear haste is exact**: equipped item IDs join against the item DB.
-- **Magic haste is estimated**: buff IDs carry no magnitude (March
-  potency depends on the bard), so Haste/March/Slow/Elegy use
-  documented defaults and every report carries `magic_estimated`.
-  Users can pin known magnitudes via overrides
-  (`haste_from_buffs(buffs, { [214] = 0.140625 })`), which clears the
-  flag for that source.
-- **Ability haste**: Hasso is a fixed, known 10% (2H-only, exact);
-  Haste Samba is estimated.
+- **Magic haste is estimated only where the source says so**: the
+  magnitudes were audited in Phoenix's own spell scripts. Haste is
+  14.65% (power cap 1465/10000 in `enhancing_spell.lua`) - exact at
+  capped enhancing skill, the 75-era norm. Elegy powers are fixed in
+  source (Battlefield 25%, Carnage 50%) but share one effect ID, so
+  the buff stays estimated with a Carnage default. March
+  (skill+instrument) and Slow (dMND/Hojo tiers) are genuinely
+  caster-dependent. Overrides
+  (`haste_from_buffs(buffs, { [214] = 0.140625 })`) clear the flag.
+- **Ability haste**: Hasso is exactly 10% (fixed in the enabled
+  abyssea module); Haste Samba and Desperate-Blows Last Resort are
+  estimated.
 
 Everything except the small Ashita glue block (`attach`, packet event +
 inventory/buff reads) is pure Lua and unit-tested: packet `0x061`
@@ -219,11 +226,55 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
 
+## Phase 4: advisor and panel
+
+`advisor.lua` emits **ranked actionable deltas** - each line a concrete
+change plus its expected gain, sorted largest first; informational
+state ("pDIF capped - trade att for acc") sorts last:
+
+```
++90 acc to cap vs Lv.25 (50% -> 95%, +90.0% melee)
++1 STR -> fSTR 13.75 (+0.4% per swing)
++88 att to pDIF cap vs DEF 300 (+1.1% per 10 att)
+Best WS @1000 TP: heavy_strike (~412) - 28% over true_strike
+```
+
+Design points:
+
+- **atkVaries/fTP routing guard**: the WS database is a verbatim
+  transcript, and `adapt_ws_params` routes each param down the same
+  path `weaponskills.lua` does - `ftpMod` to the damage multiplier,
+  `atkVaries` to the pDIF attack input, never merged. A regression
+  test computes the same WS both ways and asserts the wiki-blurred
+  version differs.
+- **Mob disambiguation**: same-name spawns with different level rows
+  are evaluated as a candidate SET; every metric uses the worst-case
+  point and is flagged (`~`) until something narrows it. `/whet level
+  <n>` (checker/widescan) pins the level and interpolates stats
+  between the generated min/max rows.
+- Lines marked `~` depend on an estimate (unnarrowed level range or
+  estimated magic haste); exact lines are unmarked.
+
+## Conservation checks
+
+All three extractors structurally prevent silent row loss:
+
+- INSERT statements are counted by **prefix only**, independent of the
+  full-line parser; any mismatch raises `ConservationError`.
+- Every driving-table row is emitted or explicitly skip-counted, and
+  the books must balance (e.g. the full mob run accounts for all
+  101,586 spawn rows).
+- Enabled module SQL (`modules/init.txt`) is ingested: Dynamis spawns
+  (4,924 rows) come from `dyna_spawn.sql`, era weapon-skill SQL
+  updates are applied, and any module UPDATE touching a consumed
+  column that the extractor cannot apply fails the build.
+
 ## Running the tests
 
 ```sh
 lua5.1 Whetstone/tests/test_formulas.lua       # or: busted ...
 lua5.1 Whetstone/tests/test_player.lua
+lua5.1 Whetstone/tests/test_advisor.lua
 python3 Whetstone/tools/test_extract_mobs.py
 python3 Whetstone/tools/test_extract_ws.py
 python3 Whetstone/tools/test_extract_items.py

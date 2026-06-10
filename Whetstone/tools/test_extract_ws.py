@@ -107,7 +107,7 @@ class ExtractWsTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         root = Path(cls.tmp.name)
         build_fixture(root)
-        cls.db = X.extract(root)
+        cls.db, cls.accounting = X.extract(root)
 
     @classmethod
     def tearDownClass(cls):
