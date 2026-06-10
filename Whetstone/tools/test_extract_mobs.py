@@ -185,11 +185,23 @@ class ExtractionTests(unittest.TestCase):
 
         self.assertEqual((20, 25), (e['min_level'], e['max_level']))
         self.assertEqual({'vit': 20, 'agi': 20, 'def': 76, 'eva': 68},
-                         e['min'])
+                         e['levels'][20])
         self.assertEqual({'vit': 24, 'agi': 24, 'def': 92, 'eva': 84},
-                         e['max'])
+                         e['levels'][25])
         self.assertEqual('WAR', e['mjob'])
         self.assertFalse(e['nm'])
+
+    def test_per_level_rows_are_exact(self):
+        # Level 21 (an INTERIOR level, must be exact, not interpolated):
+        #   fVIT = 4+(20*40)//100 = 12, mVIT = 3+(20*35)//100 = 10 -> VIT 22
+        #   fAGI = 3+(20*35)//100 = 10, mAGI = 4+(20*40)//100 = 12 -> AGI 22
+        #   DEF = 8 + 22//2 + floor(5 + 20*2.8)=61 -> 80
+        #   EVA = 61 + 22//2 = 72
+        e = self.entry(1, 'Snipper')
+
+        self.assertEqual(6, len(e['levels']))  # 20..25 inclusive
+        self.assertEqual({'vit': 22, 'agi': 22, 'def': 80, 'eva': 72},
+                         e['levels'][21])
 
     def test_spawn_points_deduped(self):
         # Two spawn points of the same group -> one entry (asserted in
@@ -207,7 +219,7 @@ class ExtractionTests(unittest.TestCase):
         e = self.entry(1, 'Sub Crab')
 
         self.assertEqual({'vit': 34, 'agi': 33, 'def': 111, 'eva': 102},
-                         e['min'])
+                         e['levels'][30])
 
     def test_subjob_formula_inside_original_zones(self):
         # Same pool in zone 100 (West Ronfaure, subjob zone, sLvl < 50):
@@ -217,7 +229,7 @@ class ExtractionTests(unittest.TestCase):
         e = self.entry(100, 'Sub Crab')
 
         self.assertEqual({'vit': 30, 'agi': 30, 'def': 109, 'eva': 101},
-                         e['min'])
+                         e['levels'][30])
 
     def test_traits_apply_highest_rank(self):
         # Rock Crab WAR/NIN @30: NIN Evasion Bonus rank 2 (+22) applies.
@@ -229,29 +241,29 @@ class ExtractionTests(unittest.TestCase):
         e = self.entry(1, 'Rock Crab')
 
         self.assertEqual({'vit': 35, 'agi': 36, 'def': 111, 'eva': 133},
-                         e['min'])
+                         e['levels'][30])
 
     def test_species_mods(self):
         # Pool Crab (species 11, +20 EVA species mod) @20: EVA 68 + 20
         e = self.entry(1, 'Pool Crab')
 
-        self.assertEqual(88, e['min']['eva'])
-        self.assertEqual(76, e['min']['def'])
+        self.assertEqual(88, e['levels'][20]['eva'])
+        self.assertEqual(76, e['levels'][20]['def'])
 
     def test_pool_mods_and_nm_flag(self):
         # Mod Crab @20: +12 DEF pool mod -> 88; the is_mob_mod=1 row
         # (+99 EVA) must be ignored -> EVA stays 68. mobType bit 2 -> NM.
         e = self.entry(1, 'Mod Crab')
 
-        self.assertEqual(88, e['min']['def'])
-        self.assertEqual(68, e['min']['eva'])
+        self.assertEqual(88, e['levels'][20]['def'])
+        self.assertEqual(68, e['levels'][20]['eva'])
         self.assertTrue(e['nm'])
 
     def test_lua_emission_is_loadable_shape(self):
         text = X.emit_lua(self.mobs, 'fixture')
 
         self.assertIn("['Snipper']", text)
-        self.assertIn('min = { vit = 20, agi = 20, def = 76, eva = 68 }',
+        self.assertIn('[20] = { vit = 20, agi = 20, def = 76, eva = 68 }',
                       text)
         self.assertTrue(text.startswith('-- Generated'))
         self.assertTrue(text.rstrip().endswith('}'))

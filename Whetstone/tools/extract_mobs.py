@@ -866,6 +866,13 @@ def extract(data: ServerData, zones=None) -> tuple:
 
         accounting['emitted'] += 1
 
+        # The stat function is exact and cheap: emit EVERY level in the
+        # spawn range rather than endpoints, so consumers never have to
+        # approximate between rows.
+        levels = {}
+        for level in range(row['min_level'], row['max_level'] + 1):
+            levels[level] = data.stats_at_level(zone, poolid, level)
+
         entry = {
             'group': row['group'],
             'pool': poolid,
@@ -875,8 +882,7 @@ def extract(data: ServerData, zones=None) -> tuple:
             'sjob': JOB_NAMES[pool['sjob']],
             'family': data.species[pool['species']]['family'],
             'nm': bool(pool['mob_type'] & 0x02),
-            'min': data.stats_at_level(zone, poolid, row['min_level']),
-            'max': data.stats_at_level(zone, poolid, row['max_level']),
+            'levels': levels,
         }
         output[zone].setdefault(row['name'].replace('_', ' '),
                                 []).append(entry)
@@ -910,22 +916,20 @@ def emit_lua(mobs: dict, source: str) -> str:
             lines.append('        [%s] = {' % lua_string(name))
 
             for e in mobs[zone][name]:
-                stats = []
-                for which in ('min', 'max'):
-                    s = e[which]
-                    stats.append(
-                        '%s = { vit = %d, agi = %d, def = %d, eva = %d }'
-                        % (which, s['vit'], s['agi'], s['def'], s['eva']))
+                level_rows = ', '.join(
+                    '[%d] = { vit = %d, agi = %d, def = %d, eva = %d }'
+                    % (level, s['vit'], s['agi'], s['def'], s['eva'])
+                    for level, s in sorted(e['levels'].items()))
 
                 lines.append(
                     '            { min_level = %d, max_level = %d, '
                     'mjob = %s, sjob = %s, family = %s, nm = %s, '
-                    'group = %d, %s, %s },'
+                    'group = %d, levels = { %s } },'
                     % (e['min_level'], e['max_level'],
                        lua_string(e['mjob']), lua_string(e['sjob']),
                        lua_string(e['family']),
                        'true' if e['nm'] else 'false',
-                       e['group'], stats[0], stats[1]))
+                       e['group'], level_rows))
 
             lines.append('        },')
 

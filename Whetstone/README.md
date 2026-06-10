@@ -19,16 +19,17 @@ questions a melee actually cares about:
 | --- | --- | --- |
 | `formulas.lua` | Pure Lua combat math, zero Ashita dependencies, server profiles | **done (Phase 1)** |
 | `tests/test_formulas.lua` | Unit tests for every formula | **done (Phase 1)** |
-| `tools/extract_mobs.py` | Phoenix SQL → mob lookup (level range, VIT/AGI/DEF/EVA at min and max level) | **done (Phase 2)** |
+| `tools/extract_mobs.py` | Phoenix SQL → mob lookup (VIT/AGI/DEF/EVA, exact row per level in each spawn range) | **done (Phase 2/5)** |
 | `tools/extract_ws.py` | Phoenix WS scripts/era modules → weapon skill database | **done (Phase 3)** |
 | `tools/extract_items.py` | Phoenix item SQL → equipment database (exact gear haste, att/acc/stats, weapon D/delay/skill) | **done (Phase 3)** |
 | `tools/test_extract_*.py` | Unit tests for each extractor | **done** |
-| `player.lua` | Char stats from packet `0x061`, equipment via Ashita inventory, haste from buff IDs + item DB | **done (Phase 3)** |
+| `player.lua` | Char stats (`0x061`), combat skills (`0x062`), equipment via Ashita inventory, haste from buff IDs + item DB | **done (Phase 3/5)** |
 | `tests/test_player.lua` | Unit tests for the pure parts of player.lua | **done (Phase 3)** |
 | `advisor.lua` | Ranked actionable deltas from formulas + generated data + player state | **done (Phase 4)** |
-| `tests/test_advisor.lua` | Routing guard, disambiguation, ranking tests | **done (Phase 4)** |
+| `tests/test_advisor.lua` | Routing guard, disambiguation, ranking, WS gating tests | **done (Phase 4/5)** |
 | `ui.lua` | One-glance ImGui panel (renders advisor output) | **done (Phase 4, needs in-game shakedown)** |
-| `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `/whet level <n>`, `/whet march <pct>`) | **done (Phase 4, needs in-game shakedown)** |
+| `swinglog.lua` | `/whet debug` predicted-vs-observed logging (0x028 action parser) | **done (Phase 5, needs in-game shakedown)** |
+| `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `level`, `march`, `quest`, `debug`) | **done (Phase 5, needs in-game shakedown)** |
 | `PROVENANCE.md` | Function-by-function ground-truth manifest + full enabled-module audit | **done** |
 
 > **Release packaging:** the generated tables (`data/mobs.lua`,
@@ -125,16 +126,19 @@ Notes:
 
 Because stats derive from job + family + level, and every spawn has a
 level *range* (`mob_spawn_points.minLevel/maxLevel` on Phoenix), the
-extractor emits **stats at both the minimum and maximum level** of each
-mob entry rather than a single value:
+extractor emits **an exact stat row for every level in the range** -
+the stat function is exact and cheap, so nothing downstream ever
+approximates between rows:
 
 ```lua
 [103] = { -- Valkurm Dunes
     ['Damselfly'] = {
         { min_level = 22, max_level = 23, mjob = 'WAR', sjob = 'WAR',
           family = 'Fly', nm = false, group = 12,
-          min = { vit = 22, agi = 26, def = 92, eva = 76 },
-          max = { vit = 22, agi = 26, def = 95, eva = 79 } },
+          levels = {
+              [22] = { vit = 22, agi = 26, def = 92, eva = 76 },
+              [23] = { vit = 22, agi = 26, def = 95, eva = 79 },
+          } },
     },
 },
 ```
@@ -226,6 +230,27 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
 
+## Phase 5: real accuracy, WS gating, swing logging
+
+- **Real base accuracy from packet `0x062`** (skill_base[64] at offset
+  0x80, 0x8000 = capped flag). The advisor's flagship "acc to cap"
+  number is derived from the player's ACTUAL combat skill through the
+  server's `GetAccFromSkill` curve + DEX x 0.75 + gear - an
+  assumed-capped skill would be maximally wrong at launch, when
+  everyone levels with lagging skill. The panel waits for 0x062 rather
+  than guess.
+- **WS availability gating**: only weapon skills the player can use
+  are ranked - matching weapon, job list, and the module-corrected
+  `skilllevel` threshold against the REAL parsed skill. Quest-locked
+  WS (`unlock_id > 0`; the 240-skill quests like Decimation) are
+  excluded by default because quest flags are not client-readable;
+  `/whet quest` toggles them on for players who have them.
+- **`/whet debug` swing logging** (`swinglog.lua`): parses 0x028
+  action packets (bit reader round-trip-tested against an independent
+  packer replicating the server's `packBitsBE`) and appends
+  predicted-vs-observed lines per melee swing / WS to
+  `whetstone_swings.log` for offline validation.
+
 ## Phase 4: advisor and panel
 
 `advisor.lua` emits **ranked actionable deltas** - each line a concrete
@@ -250,8 +275,8 @@ Design points:
 - **Mob disambiguation**: same-name spawns with different level rows
   are evaluated as a candidate SET; every metric uses the worst-case
   point and is flagged (`~`) until something narrows it. `/whet level
-  <n>` (checker/widescan) pins the level and interpolates stats
-  between the generated min/max rows.
+  <n>` (checker/widescan) pins the level and reads the EXACT generated
+  stat row for that level - no interpolation anywhere.
 - Lines marked `~` depend on an estimate (unnarrowed level range or
   estimated magic haste); exact lines are unmarked.
 
@@ -269,12 +294,45 @@ All three extractors structurally prevent silent row loss:
   updates are applied, and any module UPDATE touching a consumed
   column that the extractor cannot apply fails the build.
 
+## Beta validation plan
+
+Hard rule: **any non-Phoenix server validates plumbing only** -
+packets parse, inventory and target APIs behave, lookups hit, the
+panel renders. It never validates math: custom servers run custom
+formulas, and "the numbers looked right on server X" is evidence about
+server X. The four math questions below are settled exclusively on
+Phoenix, where one `/whet debug` parse session covers all of them.
+
+Checklist (compare `whetstone_swings.log` against predictions):
+
+1. **Legacy alpha** - WS damage at fixed TP vs a known mob: predicted
+   `mainBase` uses alpha 0.83 @75. If observed WS averages run ~+10%
+   hot on WSC-heavy skills, the server has Adoulin WS changes on ->
+   flip `legacy_alpha` in the phoenix profile.
+2. **E[pDIF] distribution** - a few hundred melee swings vs one
+   pinned-level target: observed damage/base should fill
+   `pdif_range` (the logged lower-upper bounds x 1.00-1.05) with a
+   ~1/3 spike at exactly 1.0 x base near wRatio 1, and the mean should
+   match `predicted_mean` within sampling error.
+3. **Haste pin** - cast Haste only, count swing timestamps: delay
+   multiplier should match 1 - 0.1465 exactly (capped-skill caster).
+   A 15.00% server would show up over a long enough sample.
+4. **95% cap** - acc-capped vs a trivially low-evasion mob: miss rate
+   converges to 5% (never ~1%, which would mean the 99% cap is live
+   and the soa module is off).
+
+Also verify during plumbing shakedown: the DEX-to-accuracy multiplier
+(`dex_acc_multiplier` 0.75 vs the pre-ToAU 0.5 - Phoenix's deployed
+setting is not in their repo) by comparing the equip-screen accuracy
+against `formulas.player_accuracy` for the same gear.
+
 ## Running the tests
 
 ```sh
 lua5.1 Whetstone/tests/test_formulas.lua       # or: busted ...
 lua5.1 Whetstone/tests/test_player.lua
 lua5.1 Whetstone/tests/test_advisor.lua
+lua5.1 Whetstone/tests/test_swinglog.lua
 python3 Whetstone/tools/test_extract_mobs.py
 python3 Whetstone/tools/test_extract_ws.py
 python3 Whetstone/tools/test_extract_items.py

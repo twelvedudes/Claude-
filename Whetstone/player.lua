@@ -69,9 +69,22 @@ local function i32(data, offset)
     return value
 end
 
-M.PACKET_CHAR_STATS = 0x061
+M.PACKET_CHAR_STATS  = 0x061
+M.PACKET_CHAR_SKILLS = 0x062
 
 local STAT_KEYS = { 'str', 'dex', 'vit', 'agi', 'int', 'mnd', 'chr' }
+
+-- SKILLTYPE ids (src/common/mmo.h) for the combat skills the advisor
+-- needs; 0x062 carries u16[64] indexed by this id.
+M.COMBAT_SKILL_IDS =
+{
+    hand_to_hand = 1,  dagger = 2,        sword = 3,
+    great_sword  = 4,  axe = 5,           great_axe = 6,
+    scythe       = 7,  polearm = 8,       katana = 9,
+    great_katana = 10, club = 11,         staff = 12,
+    archery      = 25, marksmanship = 26, throwing = 27,
+    guard        = 28, evasion = 29,      shield = 30, parry = 31,
+}
 
 -- Parse a full 0x061 packet (including the 4-byte header).
 -- Returns nil if the payload is too short to contain atk/def.
@@ -102,6 +115,42 @@ function M.parse_char_stats(data)
         result.base_stats[key] = base
         result.stat_bonus[key] = bonus
         result.stats[key]      = base + bonus
+    end
+
+    return result
+end
+
+-- Parse a full 0x062 packet (Char Skills / CLISTATUS2).
+-- Layout (Phoenix src/map/packets/s2c/0x062_clistatus2.h, offsets
+-- include the 4-byte header):
+--   0x04 u32 CommandRecast[31]   (ability recasts, skipped)
+--   0x80 u16 skill_base[64]      indexed by SKILLTYPE id; the high bit
+--                                (0x8000) flags the skill as capped
+--                                (blue in the client), low 15 bits are
+--                                the actual value.
+-- Returns { by_name = { hand_to_hand = { value, capped }, ... } } or
+-- nil when truncated.
+function M.parse_char_skills(data)
+    local base = 0x80
+
+    if #data < base + 2 then
+        return nil
+    end
+
+    local result = { by_name = {} }
+
+    for name, id in pairs(M.COMBAT_SKILL_IDS) do
+        local offset = base + id * 2
+
+        if #data >= offset + 2 then
+            local raw = u16(data, offset)
+
+            result.by_name[name] =
+            {
+                value  = raw % 0x8000,
+                capped = raw >= 0x8000,
+            }
+        end
     end
 
     return result
@@ -314,6 +363,7 @@ end
 M.state =
 {
     char_stats = nil, -- last parsed 0x061
+    skills     = nil, -- last parsed 0x062
     equipment  = {},  -- slot id -> item id
     buffs      = {},  -- active buff id array
 }
@@ -364,6 +414,12 @@ function M.attach(addon_name)
 
                 if parsed then
                     M.state.char_stats = parsed
+                end
+            elseif event.id == M.PACKET_CHAR_SKILLS then
+                local parsed = M.parse_char_skills(event.data)
+
+                if parsed then
+                    M.state.skills = parsed
                 end
             end
         end)

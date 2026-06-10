@@ -87,27 +87,17 @@ end
 -- Mob candidate handling
 -- =====================================================================
 
--- Linear interpolation between the generated min/max stat rows. The
--- underlying server formulas are piecewise-linear in level, so this is
--- a close approximation between the exact endpoints.
+-- Exact per-level lookup: the generated mob table carries a row for
+-- EVERY level in the spawn range (the server stat function is exact,
+-- so nothing is approximated). Out-of-range levels clamp to the ends.
 function M.stats_at_level(entry, level)
-    if level <= entry.min_level then
-        return entry.min
+    if level < entry.min_level then
+        level = entry.min_level
+    elseif level > entry.max_level then
+        level = entry.max_level
     end
 
-    if level >= entry.max_level or entry.max_level == entry.min_level then
-        return entry.max
-    end
-
-    local t = (level - entry.min_level)
-        / (entry.max_level - entry.min_level)
-    local result = {}
-
-    for key, low in pairs(entry.min) do
-        result[key] = floor(low + (entry.max[key] - low) * t + 0.5)
-    end
-
-    return result
+    return entry.levels[level]
 end
 
 -- p: { mobs = mob_db, zone = id, name = 'Mob Name', level = optional }
@@ -151,11 +141,14 @@ function M.candidates(p)
             }
         else
             points[#points + 1] =
-                { level = entry.min_level, stats = entry.min, entry = entry }
+                { level = entry.min_level,
+                  stats = M.stats_at_level(entry, entry.min_level),
+                  entry = entry }
 
             if entry.max_level ~= entry.min_level then
                 points[#points + 1] =
-                    { level = entry.max_level, stats = entry.max,
+                    { level = entry.max_level,
+                      stats = M.stats_at_level(entry, entry.max_level),
                       entry = entry }
             end
         end
@@ -433,8 +426,20 @@ function M.evaluate(p)
                 end
             end
 
+            -- Real (module-corrected) skill threshold: never rank a WS
+            -- the player's combat skill hasn't unlocked.
             if usable and player.ws_skill then
                 usable = entry.skill_level <= player.ws_skill
+            end
+
+            -- Quest WS (unlock_id > 0, e.g. the 240-skill quests):
+            -- quest completion flags are not readable from the client,
+            -- so these are EXCLUDED unless the user toggles them on
+            -- (/whet quest). Recommending an unobtained Decimation is
+            -- worse than omitting an obtained one.
+            if usable and entry.unlock_id and entry.unlock_id > 0
+                and not p.assume_quest_ws then
+                usable = false
             end
 
             local ws = usable and M.adapt_ws_params(entry) or nil

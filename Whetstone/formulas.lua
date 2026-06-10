@@ -116,6 +116,12 @@ M.PROFILES =
         -- fSTR via C++ integer division (truncation toward zero).
         fstr_integer = false,
 
+        -- battleentity.cpp ACC(): DEX-to-accuracy multiplier.
+        -- Phoenix's tracked default is 0.75 for every weapon class
+        -- (settings/default/main.lua, "has been 0.5 in previous
+        -- eras"); deployed value unverified - beta checklist item.
+        dex_acc_multiplier = 0.75,
+
         -- settings/default/main.lua DELAY_REDUCTION_CAP
         delay_reduction_cap = 0.80,
     },
@@ -150,6 +156,7 @@ M.PROFILES =
 
         legacy_alpha        = false, -- Adoulin WS rules: alpha = 1
         fstr_integer        = false,
+        dex_acc_multiplier  = 0.75,
         delay_reduction_cap = 0.80,
     },
 }
@@ -455,6 +462,47 @@ function M.acc_for_cap(p)
     local cap = M.hit_rate_cap(p)
 
     return p.eva + (cap * 100 - 75) * 2 - acc_level_correction(p)
+end
+
+-- =====================================================================
+-- Player accuracy from combat skill
+-- battleentity.cpp: GetAccFromSkill / CBattleEntity::ACC (player branch)
+-- =====================================================================
+
+-- The diminishing-returns skill -> accuracy curve.
+function M.acc_from_skill(skill)
+    if skill > 600 then
+        return 540 + floor((skill - 600) * 0.9)
+    elseif skill > 400 then
+        return 380 + floor((skill - 400) * 0.8)
+    elseif skill > 200 then
+        return 200 + floor((skill - 200) * 0.9)
+    end
+
+    return skill
+end
+
+-- Player melee accuracy.
+-- p:
+--   skill           combat skill level for the swinging weapon
+--   dex             total DEX
+--   acc_mod         Mod::ACC total (gear + buffs + food flat acc)
+--   twohand_acc     Mod::TWOHAND_ACC (Hasso's +10 etc.), 2H only
+--   two_handed      bool
+--   merits          flat merit accuracy (default 0)
+--   dex_multiplier  override; defaults to the profile knob (0.75)
+--   profile
+function M.player_accuracy(p)
+    local multiplier = p.dex_multiplier
+        or get_profile(p.profile).dex_acc_multiplier
+
+    local acc = M.acc_from_skill(p.skill) + floor((p.dex or 0) * multiplier)
+
+    if p.two_handed then
+        acc = acc + (p.twohand_acc or 0)
+    end
+
+    return acc + (p.acc_mod or 0) + (p.merits or 0)
 end
 
 -- =====================================================================

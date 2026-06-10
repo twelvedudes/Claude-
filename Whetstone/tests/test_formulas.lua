@@ -351,6 +351,56 @@ describe('hit rate', function()
 end)
 
 -- =====================================================================
+describe('player accuracy', function()
+    it('matches the GetAccFromSkill curve', function()
+        -- battleentity.cpp: <=200 1:1, then 0.9, 0.8 past 400, 0.9 past 600
+        assert.are.equal(150, F.acc_from_skill(150))
+        assert.are.equal(200, F.acc_from_skill(200))
+        -- 276 (A+ skill @75): 200 + floor(76 * 0.9) = 268
+        assert.are.equal(268, F.acc_from_skill(276))
+        assert.are.equal(380, F.acc_from_skill(400))
+        -- 450: 380 + floor(50 * 0.8) = 420
+        assert.are.equal(420, F.acc_from_skill(450))
+        -- 700: 540 + floor(100 * 0.9) = 630
+        assert.are.equal(630, F.acc_from_skill(700))
+    end)
+
+    it('combines skill, DEX and gear accuracy', function()
+        -- skill 276 -> 268; DEX 70 * 0.75 (Phoenix default) = 52;
+        -- gear +13 => 333
+        local acc = F.player_accuracy(
+        {
+            skill   = 276,
+            dex     = 70,
+            acc_mod = 13,
+        })
+
+        assert.are.equal(333, acc)
+    end)
+
+    it('adds TWOHAND_ACC only for two-handers', function()
+        local base = { skill = 276, dex = 70, twohand_acc = 10 }
+
+        assert.are.equal(320, F.player_accuracy(base))
+
+        base.two_handed = true
+        assert.are.equal(330, F.player_accuracy(base))
+    end)
+
+    it('honors a custom DEX multiplier (pre-ToAU 0.5 era)', function()
+        -- skill 276 -> 268; DEX 70 * 0.5 = 35
+        local acc = F.player_accuracy(
+        {
+            skill          = 276,
+            dex            = 70,
+            dex_multiplier = 0.5,
+        })
+
+        assert.are.equal(303, acc)
+    end)
+end)
+
+-- =====================================================================
 describe('haste stacking', function()
     it('caps gear haste at 25%', function()
         local h = F.haste({ gear = 0.30 })

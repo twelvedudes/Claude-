@@ -176,6 +176,54 @@ describe('char stats packet (0x061)', function()
     end)
 end)
 
+-- ---------------------------------------------------------------------
+-- 0x062 fixture: 4-byte header + 31 u32 recasts + u16 skill_base[64]
+-- ---------------------------------------------------------------------
+
+local function build_char_skills_packet()
+    local parts = { string.char(0x62, 0x00, 0x00, 0x00) }
+
+    for _ = 1, 31 do
+        parts[#parts + 1] = le32(0) -- recasts, skipped by the parser
+    end
+
+    local skills = {}
+    for id = 0, 63 do
+        skills[id] = 0
+    end
+
+    skills[6]  = 269 + 0x8000 -- great axe 269, capped flag set
+    skills[5]  = 240          -- axe 240, not capped
+    skills[29] = 230 + 0x8000 -- evasion 230, capped
+
+    for id = 0, 63 do
+        parts[#parts + 1] = le16(skills[id])
+    end
+
+    return table.concat(parts)
+end
+
+describe('char skills packet (0x062)', function()
+    local parsed = P.parse_char_skills(build_char_skills_packet())
+
+    it('reads skill values from offset 0x80 by SKILLTYPE id', function()
+        assert.are.equal(269, parsed.by_name.great_axe.value)
+        assert.are.equal(240, parsed.by_name.axe.value)
+        assert.are.equal(230, parsed.by_name.evasion.value)
+        assert.are.equal(0, parsed.by_name.dagger.value)
+    end)
+
+    it('separates the 0x8000 capped flag from the value', function()
+        assert.is_true(parsed.by_name.great_axe.capped)
+        assert.is_false(parsed.by_name.axe.capped)
+        assert.is_true(parsed.by_name.evasion.capped)
+    end)
+
+    it('rejects truncated packets', function()
+        assert.is_nil(P.parse_char_skills(string.char(0x62, 8, 0, 0, 1, 2)))
+    end)
+end)
+
 -- =====================================================================
 describe('haste from buffs', function()
     it('sums magic haste per buff instance and flags it estimated', function()

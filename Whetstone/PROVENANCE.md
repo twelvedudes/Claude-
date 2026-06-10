@@ -63,6 +63,9 @@ Adjacent but out of the damage model (documented, not modeled):
 | player.lua datum | Ground truth |
 | --- | --- |
 | packet 0x061 layout | `src/map/packets/s2c/0x061_clistatus.h` |
+| packet 0x062 layout (skills @0x80, 0x8000 capped flag) | `src/map/packets/s2c/0x062_clistatus2.h/.cpp` |
+| `formulas.acc_from_skill` / `player_accuracy` | `battleentity.cpp` `GetAccFromSkill` / `ACC()` player branch; DEX multiplier 0.75 from `settings/default/main.lua` (deployed value unverified - beta checklist) |
+| 0x028 action packet bit layout (swinglog.lua) | `src/map/packets/s2c/0x028_battle2.cpp` `pack()`; `unpackBitsBE` little-endian aggregate semantics from `src/common/utils.cpp` |
 | Haste 14.65% | `scripts/globals/spells/enhancing_spell.lua` (power cap 1465/10000) — exact at capped skill |
 | Hasso 10% | `modules/abyssea/lua/job_adjustments.lua` (enabled) — exact |
 | Elegy −25%/−50% | `scripts/globals/spells/enfeebling_song.lua` (fixed 2500/5000; effect ID ambiguous → estimated, default Carnage) |

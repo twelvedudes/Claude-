@@ -129,16 +129,24 @@ local MOB_DB =
     {
         ['Test Crab'] =
         {
-            -- candidate A: a level band
+            -- candidate A: a level band. Level 21's eva (305) is
+            -- deliberately NOT the 20/22 midpoint: the lookup must be
+            -- exact, never interpolated.
             { group = 1, pool = 10, min_level = 20, max_level = 22,
               mjob = 'WAR', sjob = 'NON', family = 'Crab', nm = false,
-              min = { vit = 20, agi = 20, def = 80, eva = 300 },
-              max = { vit = 22, agi = 22, def = 86, eva = 306 } },
+              levels =
+              {
+                  [20] = { vit = 20, agi = 20, def = 80, eva = 300 },
+                  [21] = { vit = 21, agi = 21, def = 84, eva = 305 },
+                  [22] = { vit = 22, agi = 22, def = 86, eva = 306 },
+              } },
             -- candidate B: a different, higher spawn with the same name
             { group = 2, pool = 11, min_level = 25, max_level = 25,
               mjob = 'WAR', sjob = 'NON', family = 'Crab', nm = false,
-              min = { vit = 30, agi = 30, def = 300, eva = 350 },
-              max = { vit = 30, agi = 30, def = 300, eva = 350 } },
+              levels =
+              {
+                  [25] = { vit = 30, agi = 30, def = 300, eva = 350 },
+              } },
         },
     },
 }
@@ -177,6 +185,22 @@ local WS_DB =
         kind = 'special', source = 'wotg_module', main_only = false,
         unlock_id = 0, jobs = { 'WAR' }, sc = {},
         params = {},
+    },
+    -- quest-locked (unlock_id > 0): excluded unless toggled on
+    quest_strike =
+    {
+        id = 6, skill = 'great_axe', skill_level = 240, element = 0,
+        kind = 'physical', source = 'wotg_module', main_only = false,
+        unlock_id = 10, jobs = { 'WAR' }, sc = {},
+        params = { numHits = 1, ftpMod = { 3.0, 3.0, 3.0 }, str_wsc = 0.5 },
+    },
+    -- above the fixture player's combat skill when ws_skill is given
+    high_skill_strike =
+    {
+        id = 7, skill = 'great_axe', skill_level = 250, element = 0,
+        kind = 'physical', source = 'wotg_module', main_only = false,
+        unlock_id = 0, jobs = { 'WAR' }, sc = {},
+        params = { numHits = 1, ftpMod = { 1.5, 1.5, 1.5 }, str_wsc = 0.5 },
     },
     -- excluded: dynamic transcript value
     weird_ws =
@@ -306,16 +330,18 @@ end)
 
 -- =====================================================================
 describe('mob candidates', function()
-    it('interpolates stats between the min/max rows', function()
+    it('looks up exact per-level rows (no interpolation)', function()
         local entry = MOB_DB[103]['Test Crab'][1]
         local mid = A.stats_at_level(entry, 21)
 
-        assert.are.equal(303, mid.eva) -- 300 + (306-300) * 0.5
-        assert.are.equal(83, mid.def)  -- 80 + 6 * 0.5
-        assert.are.equal(21, mid.vit)  -- 20 + 2 * 0.5
+        -- 305 is the generated row, NOT the 303 a midpoint
+        -- interpolation would produce
+        assert.are.equal(305, mid.eva)
+        assert.are.equal(84, mid.def)
+        assert.are.equal(21, mid.vit)
     end)
 
-    it('clamps interpolation to the endpoints', function()
+    it('clamps out-of-range levels to the end rows', function()
         local entry = MOB_DB[103]['Test Crab'][1]
 
         assert.are.equal(300, A.stats_at_level(entry, 10).eva)
@@ -340,7 +366,7 @@ describe('mob candidates', function()
         assert.are.equal(1, #c.entries)
         assert.are.equal(1, #c.points)
         assert.is_false(c.ambiguous)
-        assert.are.equal(303, c.points[1].stats.eva)
+        assert.are.equal(305, c.points[1].stats.eva)
     end)
 
     it('falls back to the full set on a bad pin', function()
@@ -410,11 +436,46 @@ describe('evaluate', function()
     it('ranks weapon skills and excludes unusable ones', function()
         local report = evaluate()
 
-        assert.are.equal(2, #report.ws) -- sword/special/dynamic excluded
+        -- sword/special/dynamic/quest excluded; no ws_skill given, so
+        -- high_skill_strike passes the (absent) threshold check
+        assert.are.equal(3, #report.ws)
         -- heavy_strike (fTP 2.0) beats true_strike (atk capped at 2.0
         -- pDIF already) against DEF 300
         assert.are.equal('heavy_strike', report.ws[1].name)
         assert.is_true(report.ws[1].expected > report.ws[2].expected)
+    end)
+
+    it('excludes quest WS by default, includes them when toggled', function()
+        local function names(report)
+            local found = {}
+            for _, ws in ipairs(report.ws) do
+                found[ws.name] = true
+            end
+            return found
+        end
+
+        assert.is_nil(names(evaluate()).quest_strike)
+        assert.is_true(
+            names(evaluate({ assume_quest_ws = true })).quest_strike
+            == true)
+    end)
+
+    it('filters by real combat skill when provided', function()
+        local player = {}
+        for key, value in pairs(PLAYER) do
+            player[key] = value
+        end
+        player.ws_skill = 240 -- below high_skill_strike's 250
+
+        local found = {}
+        for _, ws in ipairs(evaluate({ player = player }).ws) do
+            found[ws.name] = true
+        end
+
+        assert.is_true(found.heavy_strike == true)
+        assert.is_nil(found.high_skill_strike)
+        -- quest_strike needs skill 240 AND the quest toggle
+        assert.is_nil(found.quest_strike)
     end)
 
     it('sorts lines by delta, informational lines last', function()
