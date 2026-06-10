@@ -158,6 +158,16 @@ describe('fSTR (player melee)', function()
         -- rank 5: dSTR -34 (window edge) -> (-34+13)/4 = -5.25 -> clamp -5
         assert.are.equal(-5, F.fstr(26, 60, 5))
     end)
+
+    it('truncates toward zero with the strict-era integer knob', function()
+        -- Matches AirSkyBoat's C++ integer division: dSTR -11 ->
+        -- (-11+10)/4 = -0.25 -> 0 (toward zero, NOT floor -1)
+        local era = { fstr_integer = true }
+
+        assert.are.equal(0, F.fstr(49, 60, 5, era))
+        assert.are.equal(-0.25, F.fstr(49, 60, 5)) -- default keeps fractions
+        assert.are.equal(4, F.fstr(73, 60, 5, era)) -- 4.25 -> 4
+    end)
 end)
 
 describe('fSTR (player ranged, fSTR2)', function()
@@ -229,8 +239,8 @@ describe('hit rate', function()
         assert.are.equal(0.70, F.hit_rate({ acc = 290, eva = 300 }))
     end)
 
-    it('caps at 99% for 1H mainhand and H2H, 95% for 2H/offhand', function()
-        local p = { acc = 360, eva = 300 } -- raw 1.05
+    it('caps at 99% for 1H mainhand and H2H, 95% for 2H/offhand (lsb)', function()
+        local p = { acc = 360, eva = 300, profile = 'lsb' } -- raw 1.05
 
         assert.are.equal(0.99, F.hit_rate(p))
 
@@ -244,6 +254,20 @@ describe('hit rate', function()
         p.offhand = false
         p.h2h = true
         assert.are.equal(0.99, F.hit_rate(p))
+    end)
+
+    it('caps at a flat 95% on Phoenix (default profile)', function()
+        -- modules/soa/lua/physical_hit_cap.lua override
+        local p = { acc = 360, eva = 300 } -- raw 1.05
+
+        assert.are.equal(0.95, F.hit_rate(p)) -- 1H mainhand
+
+        p.h2h = true
+        assert.are.equal(0.95, F.hit_rate(p))
+
+        p.h2h = false
+        p.two_handed = true
+        assert.are.equal(0.95, F.hit_rate(p))
     end)
 
     it('floors at 20%', function()
@@ -307,9 +331,12 @@ describe('hit rate', function()
     end)
 
     it('computes accuracy needed for the cap', function()
-        -- 1H: eva + (99 - 75) * 2 = eva + 48
-        assert.are.equal(348, F.acc_for_cap({ eva = 300 }))
-        -- 2H: eva + 40
+        -- lsb 1H: eva + (99 - 75) * 2 = eva + 48
+        assert.are.equal(348, F.acc_for_cap({ eva = 300, profile = 'lsb' }))
+        -- lsb 2H: eva + 40
+        assert.are.equal(340, F.acc_for_cap({ eva = 300, two_handed = true, profile = 'lsb' }))
+        -- Phoenix: flat 95% cap -> eva + 40 regardless of weapon class
+        assert.are.equal(340, F.acc_for_cap({ eva = 300 }))
         assert.are.equal(340, F.acc_for_cap({ eva = 300, two_handed = true }))
         -- 2H, 5 levels down in a corrected zone: +20 more
         assert.are.equal(360, F.acc_for_cap(
@@ -370,6 +397,20 @@ describe('haste stacking', function()
         assert.near(0.75, h.multiplier, 1e-12)
         assert.near(0, h.total_overcap, 1e-12)
     end)
+
+    it('honors a profile delay reduction cap (93% ToAU option)', function()
+        local h = F.haste(
+        {
+            magic   = 0.4375,
+            ability = 0.25,
+            gear    = 0.25,
+            profile = { delay_reduction_cap = 0.93 },
+        })
+
+        assert.near(0.07, h.multiplier, 1e-12)
+        assert.near(0.93, h.total, 1e-12)
+        assert.near(0.0075, h.total_overcap, 1e-12)
+    end)
 end)
 
 describe('weapon delay', function()
@@ -406,7 +447,7 @@ describe('pDIF', function()
         -- spike = clamp(0.5 * 1.2, 0, 1/3) = 1/3
         -- E_roll = (0.7109375 + 1.3)/2 * 1.025 = 1.03060546875
         -- E = (1 + 2 * 1.03060546875) / 3
-        local r = F.melee_pdif({ attack = 500, defense = 500, weapon = 'sword' })
+        local r = F.melee_pdif({ attack = 500, defense = 500, weapon = 'sword', profile = 'lsb' })
 
         assert.near(0.7109375, r.lower, 1e-12)
         assert.near(1.3, r.upper, 1e-12)
@@ -420,7 +461,7 @@ describe('pDIF', function()
         -- lower = (2 * 1176 - 775)/1024 = 1577/1024 = 1.5400390625
         -- spike = 0
         -- E = (1.5400390625 + 2.375)/2 * 1.025 = 2.00645751953125
-        local r = F.melee_pdif({ attack = 1000, defense = 500, weapon = 'great_axe' })
+        local r = F.melee_pdif({ attack = 1000, defense = 500, weapon = 'great_axe', profile = 'lsb' })
 
         assert.near(1.5400390625, r.lower, 1e-12)
         assert.near(2.375, r.upper, 1e-12)
@@ -431,7 +472,7 @@ describe('pDIF', function()
     it('wRatio 0.2 (very low attack)', function()
         -- upper = 0.2 + 0.5 = 0.7, lower = 0 (wRatio < 0.38), spike = 0
         -- E = 0.35 * 1.025 = 0.35875
-        local r = F.melee_pdif({ attack = 100, defense = 500, weapon = 'sword' })
+        local r = F.melee_pdif({ attack = 100, defense = 500, weapon = 'sword', profile = 'lsb' })
 
         assert.near(0.35875, r.expected, 1e-12)
     end)
@@ -441,7 +482,7 @@ describe('pDIF', function()
         -- lower = (0.6 * 1176 - 448)/1024 = 257.6/1024 = 0.2515625
         -- spike = (0.5 - 0.4) * 1.2 = 0.12
         -- E = 0.12 + 0.88 * (0.2515625 + 1)/2 * 1.025 = 0.6844546875
-        local r = F.melee_pdif({ attack = 300, defense = 500, weapon = 'sword' })
+        local r = F.melee_pdif({ attack = 300, defense = 500, weapon = 'sword', profile = 'lsb' })
 
         assert.near(0.12, r.spike_chance, 1e-12)
         assert.near(0.6844546875, r.expected, 1e-12)
@@ -450,7 +491,7 @@ describe('pDIF', function()
     it('pins at the per-weapon final cap', function()
         -- ratio 5, dagger cap 3.25: lower = min(4.625, 3.25), upper = min(5.375, 3.25)
         -- E = 3.25 * 1.025 = 3.33125
-        local r = F.melee_pdif({ attack = 2500, defense = 500, weapon = 'dagger' })
+        local r = F.melee_pdif({ attack = 2500, defense = 500, weapon = 'dagger', profile = 'lsb' })
 
         assert.near(3.25, r.lower, 1e-12)
         assert.near(3.25, r.upper, 1e-12)
@@ -463,7 +504,7 @@ describe('pDIF', function()
         -- attack 1000 def 500 crit, scythe: wRatio 3, cap 4 + 1 = 5
         -- upper = min(3.375, 5), lower = min(3 - 0.375, 5) = 2.625
         -- E = 3.0 * 1.025 = 3.075
-        local r = F.melee_pdif({ attack = 1000, defense = 500, weapon = 'scythe', crit = true })
+        local r = F.melee_pdif({ attack = 1000, defense = 500, weapon = 'scythe', crit = true, profile = 'lsb' })
 
         assert.are.equal(3, r.wratio)
         assert.are.equal(5, r.final_cap)
@@ -479,6 +520,7 @@ describe('pDIF', function()
             weapon         = 'scythe',
             crit           = true,
             crit_dmg_bonus = 0.10,
+            profile        = 'lsb',
         })
 
         assert.near(3.075 * 1.1, r.expected, 1e-12)
@@ -543,10 +585,55 @@ describe('pDIF', function()
     end)
 
     it('computes attack needed for the pDIF cap', function()
-        -- sword vs 300 def: ceil((3.25 - 0.375) * 300) = 863
-        assert.are.equal(863, F.attack_for_pdif_cap({ defense = 300, weapon = 'sword' }))
-        -- great axe: ceil(3.375 * 300) = 1013
-        assert.are.equal(1013, F.attack_for_pdif_cap({ defense = 300, weapon = 'great_axe' }))
+        -- lsb sword vs 300 def: ceil((3.25 - 0.375) * 300) = 863
+        assert.are.equal(863, F.attack_for_pdif_cap({ defense = 300, weapon = 'sword', profile = 'lsb' }))
+        -- lsb great axe: ceil(3.375 * 300) = 1013
+        assert.are.equal(1013, F.attack_for_pdif_cap({ defense = 300, weapon = 'great_axe', profile = 'lsb' }))
+        -- Phoenix (2.0 cap, any melee weapon): ceil(1.625 * 300) = 488
+        assert.are.equal(488, F.attack_for_pdif_cap({ defense = 300, weapon = 'sword' }))
+        assert.are.equal(488, F.attack_for_pdif_cap({ defense = 300, weapon = 'great_axe' }))
+    end)
+end)
+
+-- =====================================================================
+describe('pDIF (Phoenix era caps)', function()
+    it('pins every melee weapon at 2.0', function()
+        -- wRatio 2, sword: upper = min(2.375, 2.0) = 2.0
+        -- lower (1.51 <= w < 2.44 branch, NOT min'd with the cap):
+        --   (2 * 1176 - 775)/1024 = 1577/1024 = 1.5400390625
+        -- E = (1.5400390625 + 2.0)/2 * 1.025 = 1.81427001953125
+        local r = F.melee_pdif({ attack = 1000, defense = 500, weapon = 'sword' })
+
+        assert.are.equal(2, r.final_cap)
+        assert.near(2.0, r.upper, 1e-12)
+        assert.near(1.5400390625, r.lower, 1e-12)
+        assert.near(1.81427001953125, r.expected, 1e-12)
+        assert.is_true(r.at_cap)
+    end)
+
+    it('caps crits at 3.0 (2.0 + 1)', function()
+        -- wRatio 3: upper = min(3.375, 3) = 3
+        -- lower (>= 2.44 branch) = min(3 - 0.375, 3) = 2.625
+        -- E = (2.625 + 3)/2 * 1.025 = 2.8828125
+        local r = F.melee_pdif({ attack = 1000, defense = 500, weapon = 'sword', crit = true })
+
+        assert.are.equal(3, r.final_cap)
+        assert.near(2.8828125, r.expected, 1e-12)
+    end)
+
+    it('keeps 3.0 caps for ranged skills', function()
+        -- modules/wotg/lua/pdif_caps_revert.lua: archery/marks/throwing = 3
+        assert.are.equal(3.0, F.PROFILES.phoenix.pdif_caps.archery)
+        assert.are.equal(3.0, F.PROFILES.phoenix.pdif_caps.marksmanship)
+        assert.are.equal(3.0, F.PROFILES.phoenix.pdif_caps.throwing)
+    end)
+
+    it('leaves sub-cap curves identical to upstream', function()
+        -- wRatio 1.0 never touches the cap, so Phoenix == lsb here
+        local phoenix = F.melee_pdif({ attack = 500, defense = 500, weapon = 'sword' })
+        local lsb     = F.melee_pdif({ attack = 500, defense = 500, weapon = 'sword', profile = 'lsb' })
+
+        assert.near(lsb.expected, phoenix.expected, 1e-12)
     end)
 end)
 
@@ -662,6 +749,7 @@ describe('weapon skill damage', function()
             target_level   = 75,
             alpha          = 0.83,
             weapon         = 'great_axe',
+            profile        = 'lsb', -- keep modern caps so EPDIF stays uncapped
         }
 
         for key, value in pairs(overrides or {}) do
@@ -787,12 +875,56 @@ describe('weapon skill damage', function()
             attacker_level = 75,
             target_level   = 75,
             alpha          = 0.83,
+            profile        = 'lsb',
         })
 
         assert.are.equal(26, r.main_base)
         assert.near(26, r.offhand_base, 1e-12)
-        -- H2H uses the 99% ceiling
+        -- H2H uses the 99% ceiling (lsb profile)
         assert.are.equal(0.99, r.first_hit_rate)
+    end)
+
+    it('selects WSC alpha from the profile', function()
+        local base =
+        {
+            weapon_dmg     = 50,
+            fstr           = 6,
+            stats          = { str = 100 },
+            ws             = { ftp = { 1.0, 1.5, 2.0 }, num_hits = 1, mods = { str = 0.5 } },
+            tp             = 1000,
+            attack         = 600,
+            defense        = 300,
+            acc            = 300,
+            eva            = 300,
+            attacker_level = 75,
+            target_level   = 75,
+            weapon         = 'great_axe',
+        }
+
+        -- Phoenix (default): legacy alpha(75) = 0.83
+        --   mainBase = floor(50 + 6 + 50 * 0.83) = 97
+        local phoenix = F.ws_damage(base)
+
+        assert.near(0.83, phoenix.alpha, 1e-12)
+        assert.are.equal(97, phoenix.main_base)
+
+        -- lsb: Adoulin rules, alpha = 1
+        --   mainBase = floor(50 + 6 + 50) = 106
+        base.profile = 'lsb'
+        local lsb = F.ws_damage(base)
+
+        assert.near(1, lsb.alpha, 1e-12)
+        assert.are.equal(106, lsb.main_base)
+    end)
+
+    it('caps Phoenix WS pDIF at the era 2.0 ceiling', function()
+        -- Same scenario under the phoenix profile: wRatio 2 great axe
+        -- E[pDIF] = (1.5400390625 + 2.0)/2 * 1.025 = 1.81427001953125
+        -- 2H hit caps are 0.95 under both profiles, so only pDIF moves.
+        local r = F.ws_damage(scenario({ profile = 'phoenix' }))
+
+        assert.near(1.81427001953125, r.expected_pdif, 1e-12)
+        assert.near(97 * 1.81427001953125 * (0.95 + 0.75), r.expected, 1e-9)
     end)
 
     it('caps total swings at 8', function()
@@ -820,6 +952,7 @@ describe('melee swing', function()
             weapon     = 'dagger',
             acc        = 300,
             eva        = 300,
+            profile    = 'lsb',
         })
 
         assert.are.equal(56, r.base)
@@ -838,6 +971,7 @@ describe('melee swing', function()
             acc        = 300,
             eva        = 300,
             crit_rate  = 0.10,
+            profile    = 'lsb',
         })
 
         -- non-crit wRatio 2: upper 2.375, lower 1577/1024

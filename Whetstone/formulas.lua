@@ -10,13 +10,29 @@
     spike), this module returns the distribution bounds and the exact
     expected value instead.
 
-    Ground truth: github.com/LandSandBoat/server
-    commit fdc24716f825de6b96a3c4c9896cd1c7295c494f
+    Ground truth (primary): github.com/phoenixffxi/Phoenix
+    commit 0f3f8fcfcad5872874fd6050bb4befb543b2d1fa
       - scripts/globals/combat/physical_utilities.lua  (fSTR, WSC, pDIF, crit)
       - scripts/globals/combat/physical_hit_rate.lua   (hit rate)
       - scripts/globals/weaponskills.lua               (WS pipeline, fTP)
       - src/map/entities/battleentity.cpp              (GetWeaponDelay, weapon rank)
-      - settings/default/main.lua                      (DELAY_REDUCTION_CAP)
+      - modules/soa/lua/physical_hit_cap.lua           (flat 95% hit ceiling)
+      - modules/wotg/lua/pdif_caps_revert.lua          (2.0 melee pDIF caps)
+
+    Phoenix's core combat files are byte-identical to upstream
+    LandSandBoat (commit fdc24716f825de6b96a3c4c9896cd1c7295c494f); its
+    era behavior comes from the two modules above, which are enabled in
+    modules/init.txt. Both rule sets are exposed here as profiles:
+
+      'phoenix' (default) - 95% hit ceiling everywhere, 2.0 melee /
+                3.0 ranged pDIF caps, legacy (level-based) WSC alpha
+      'lsb'     - upstream defaults: 99%/95% hit ceilings, modern
+                per-weapon pDIF caps (3.25-4.0), Adoulin WS rules
+                (alpha = 1)
+
+    Pass profile = 'phoenix' | 'lsb' | <custom table> in any params
+    table (or as the trailing argument of the positional fSTR
+    functions), or change M.default_profile.
 
     Conventions:
       - All rates/multipliers are fractions (0.25 == 25%).
@@ -48,40 +64,130 @@ end
 local clamp = M.clamp
 
 -- =====================================================================
--- Constants (all values lifted verbatim from LSB)
+-- Profiles
 -- =====================================================================
 
--- physical_utilities.lua: xi.combat.physical.pDifWeaponCapTable
-M.PDIF_WEAPON_CAP =
+M.PROFILES =
 {
-    hand_to_hand = 3.5,
-    dagger       = 3.25,
-    sword        = 3.25,
-    great_sword  = 3.75,
-    axe          = 3.25,
-    great_axe    = 3.75,
-    scythe       = 4.0,
-    polearm      = 3.75,
-    katana       = 3.25,
-    great_katana = 3.5,
-    club         = 3.25,
-    staff        = 3.75,
-    archery      = 3.25,
-    marksmanship = 3.5,
-    throwing     = 3.25,
+    -- Phoenix (phoenixffxi/Phoenix @ 0f3f8fc): upstream LSB code with
+    -- the soa/physical_hit_cap and wotg/pdif_caps_revert modules
+    -- enabled, and (75-cap era) legacy WSC alpha.
+    phoenix =
+    {
+        name = 'phoenix',
+
+        -- modules/soa/lua/physical_hit_cap.lua: getPhysicalHitRateCap
+        -- override returns 0.95 unconditionally (Dec 2014 cap raise
+        -- reverted).
+        hit_rate_cap_high = 0.95,
+        hit_rate_cap_low  = 0.95,
+
+        -- modules/wotg/lua/pdif_caps_revert.lua ("Original pDIF caps
+        -- for the base game", dated one day before the ToAU 2H update).
+        pdif_caps =
+        {
+            hand_to_hand = 2.0,
+            dagger       = 2.0,
+            sword        = 2.0,
+            great_sword  = 2.0,
+            axe          = 2.0,
+            great_axe    = 2.0,
+            scythe       = 2.0,
+            polearm      = 2.0,
+            katana       = 2.0,
+            great_katana = 2.0,
+            club         = 2.0,
+            staff        = 2.0,
+            archery      = 3.0,
+            marksmanship = 3.0,
+            throwing     = 3.0,
+        },
+
+        -- 75-cap servers run with USE_ADOULIN_WEAPON_SKILL_CHANGES off,
+        -- which enables the legacy level-based WSC alpha. (Phoenix's
+        -- deployed settings are not in their repo; the tracked default
+        -- is the upstream `true`, but their ToAU-era WS modules and 75
+        -- cap imply the legacy path. Flip this knob if observed
+        -- otherwise in game.)
+        legacy_alpha = true,
+
+        -- fSTR keeps LSB's unfloored quarter-point fractions; set true
+        -- for strict-era forks (e.g. AirSkyBoat) that compute integer
+        -- fSTR via C++ integer division (truncation toward zero).
+        fstr_integer = false,
+
+        -- settings/default/main.lua DELAY_REDUCTION_CAP
+        delay_reduction_cap = 0.80,
+    },
+
+    -- Upstream LandSandBoat defaults (commit fdc2471), no era modules.
+    lsb =
+    {
+        name = 'lsb',
+
+        hit_rate_cap_high = 0.99, -- 1H mainhand, H2H (incl. kicks)
+        hit_rate_cap_low  = 0.95, -- 2H, offhand, ranged
+
+        -- physical_utilities.lua: xi.combat.physical.pDifWeaponCapTable
+        pdif_caps =
+        {
+            hand_to_hand = 3.5,
+            dagger       = 3.25,
+            sword        = 3.25,
+            great_sword  = 3.75,
+            axe          = 3.25,
+            great_axe    = 3.75,
+            scythe       = 4.0,
+            polearm      = 3.75,
+            katana       = 3.25,
+            great_katana = 3.5,
+            club         = 3.25,
+            staff        = 3.75,
+            archery      = 3.25,
+            marksmanship = 3.5,
+            throwing     = 3.25,
+        },
+
+        legacy_alpha        = false, -- Adoulin WS rules: alpha = 1
+        fstr_integer        = false,
+        delay_reduction_cap = 0.80,
+    },
 }
 
--- physical_hit_rate.lua: getPhysicalHitRate clamp values
-M.HIT_RATE_FLOOR    = 0.20
-M.HIT_RATE_CAP_HIGH = 0.99 -- 1H mainhand, H2H (incl. kicks)
-M.HIT_RATE_CAP_LOW  = 0.95 -- 2H, offhand, ranged
+M.default_profile = M.PROFILES.phoenix
+
+-- Accepts a profile name, a profile table, or nil (-> default).
+local function get_profile(profile)
+    if type(profile) == 'table' then
+        return profile
+    end
+
+    if type(profile) == 'string' then
+        local found = M.PROFILES[profile]
+
+        if not found then
+            error('whetstone.formulas: unknown profile ' .. profile)
+        end
+
+        return found
+    end
+
+    return M.default_profile
+end
+
+M.get_profile = get_profile
+
+-- =====================================================================
+-- Constants shared by every profile
+-- =====================================================================
+
+-- physical_hit_rate.lua: getPhysicalHitRate clamp floor
+M.HIT_RATE_FLOOR = 0.20
 
 -- battleentity.cpp GetWeaponDelay clamps
 M.HASTE_CAP_MAGIC   = 0.4375 -- 43.75%
 M.HASTE_CAP_ABILITY = 0.25
 M.HASTE_CAP_GEAR    = 0.25
--- settings/default/main.lua DELAY_REDUCTION_CAP (server-configurable)
-M.DELAY_REDUCTION_CAP_DEFAULT = 0.80
 
 -- calculateMeleePDIF: melee random factor is 1 + random(0..5)/100,
 -- six equally likely values -> mean 1.025
@@ -154,22 +260,46 @@ function M.fstr_value_caps(weapon_rank)
     return lower, weapon_rank + 8
 end
 
--- Player melee fSTR. NOTE: LSB does NOT floor the player value, so this
--- can return fractions in steps of 0.25 (e.g. 4.25).
-function M.fstr(str, target_vit, weapon_rank)
+-- C++ integer division semantics (truncation toward zero), used by
+-- strict-era forks for fSTR. Validated against AirSkyBoat's GetFSTR
+-- (battleutils.cpp), which computes (dif + N) / 2 then /= 2 on int32.
+local function trunc(value)
+    if value >= 0 then
+        return floor(value)
+    end
+
+    return math.ceil(value)
+end
+
+-- Player melee fSTR. NOTE: LSB/Phoenix do NOT floor the player value,
+-- so this can return fractions in steps of 0.25 (e.g. 4.25). Profiles
+-- with fstr_integer (strict-era forks) truncate toward zero instead.
+function M.fstr(str, target_vit, weapon_rank, profile)
     local stat_lower, stat_upper = M.fstr_stat_diff_caps(weapon_rank)
     local stat_diff = clamp(str - target_vit, stat_lower, stat_upper)
 
+    local value = fstr4(stat_diff) / 4
+
+    if get_profile(profile).fstr_integer then
+        value = trunc(value)
+    end
+
     local value_lower, value_upper = M.fstr_value_caps(weapon_rank)
 
-    return clamp(fstr4(stat_diff) / 4, value_lower, value_upper)
+    return clamp(value, value_lower, value_upper)
 end
 
 -- Player ranged fSTR ("fSTR2").
 -- physical_utilities.lua: calculateRangedStatFactor
-function M.fstr_ranged(str, target_vit, weapon_rank)
+function M.fstr_ranged(str, target_vit, weapon_rank, profile)
     local stat_lower, stat_upper = M.fstr_stat_diff_caps(weapon_rank)
     local stat_diff = clamp(str - target_vit, stat_lower, stat_upper)
+
+    local value = fstr4(stat_diff) / 2
+
+    if get_profile(profile).fstr_integer then
+        value = trunc(value)
+    end
 
     local value_lower = weapon_rank * -2
     local value_upper = (weapon_rank + 8) * 2
@@ -180,7 +310,7 @@ function M.fstr_ranged(str, target_vit, weapon_rank)
         value_lower = -3
     end
 
-    return clamp(fstr4(stat_diff) / 2, value_lower, value_upper)
+    return clamp(value, value_lower, value_upper)
 end
 
 -- Mob / pet melee fSTR.
@@ -233,14 +363,14 @@ end
 --   at_cap      true when no amount of STR will raise fSTR vs this target
 --   str_to_next STR points needed for the next strictly higher fSTR (nil at cap)
 --   next_fstr   the fSTR value reached at that point (nil at cap)
-function M.fstr_info(str, target_vit, weapon_rank)
-    local current = M.fstr(str, target_vit, weapon_rank)
+function M.fstr_info(str, target_vit, weapon_rank, profile)
+    local current = M.fstr(str, target_vit, weapon_rank, profile)
     local _, stat_upper = M.fstr_stat_diff_caps(weapon_rank)
     local headroom = stat_upper - (str - target_vit)
 
     if headroom > 0 then
         for add = 1, headroom do
-            local candidate = M.fstr(str + add, target_vit, weapon_rank)
+            local candidate = M.fstr(str + add, target_vit, weapon_rank, profile)
 
             if candidate > current then
                 return
@@ -263,19 +393,21 @@ end
 -- =====================================================================
 
 -- Which ceiling applies to a swing.
--- p: { h2h = bool, two_handed = bool, offhand = bool }
+-- p: { h2h = bool, two_handed = bool, offhand = bool, profile = ... }
 function M.hit_rate_cap(p)
     p = p or {}
 
+    local profile = get_profile(p.profile)
+
     if p.h2h then
-        return M.HIT_RATE_CAP_HIGH
+        return profile.hit_rate_cap_high
     end
 
     if p.two_handed or p.offhand then
-        return M.HIT_RATE_CAP_LOW
+        return profile.hit_rate_cap_low
     end
 
-    return M.HIT_RATE_CAP_HIGH
+    return profile.hit_rate_cap_high
 end
 
 -- Level-correction accuracy term for a PLAYER attacker (players only
@@ -344,7 +476,7 @@ end
 function M.haste(p)
     p = p or {}
 
-    local total_cap = p.total_cap or M.DELAY_REDUCTION_CAP_DEFAULT
+    local total_cap = p.total_cap or get_profile(p.profile).delay_reduction_cap
 
     local magic   = clamp(p.magic or 0, -1.0, M.HASTE_CAP_MAGIC)
     local ability = (p.ability or 0)
@@ -458,9 +590,20 @@ local function uniform_mean(lower, upper)
 end
 
 -- Player melee/WS pDIF distribution.
+--
+-- RNG model (calculateMeleePDIF, byte-identical in Phoenix and LSB):
+--   1. spike roll: with probability spike_chance return exactly 1.0
+--      (bypasses everything below, including the crit damage bonus)
+--   2. coin flip: the upper bound's floor is 0.5 or 0 (50/50)
+--   3. ONE uniform draw between the (level-corrected) lower and upper
+--      bounds -- not a max/min of multiple draws
+--   4. multiply by the melee random factor 1.00-1.05 (six values)
+-- `expected` below is the exact closed-form mean of that process.
+--
 -- p:
 --   attack, defense     (required)
---   weapon              key into PDIF_WEAPON_CAP, or pass pdif_cap directly
+--   weapon              key into the profile's pdif_caps, or pass pdif_cap
+--   profile             'phoenix' (default) | 'lsb' | custom table
 --   pdif_cap            explicit per-weapon cap (overrides weapon)
 --   crit                bool
 --   ws_attack_mod       WS attack multiplier ("atkVaries", default 1)
@@ -501,7 +644,7 @@ function M.melee_pdif(p)
     local crit_add = p.crit and 1 or 0
     local wratio   = ratio + crit_add
 
-    local weapon_cap = p.pdif_cap or M.PDIF_WEAPON_CAP[p.weapon or 'sword']
+    local weapon_cap = p.pdif_cap or get_profile(p.profile).pdif_caps[p.weapon or 'sword']
     local final_cap  = (weapon_cap + (p.damage_limit or 0)) * (1 + (p.damage_limit_p or 0)) + crit_add
 
     local lower, upper = M.wratio_caps_pc(wratio, final_cap)
@@ -550,7 +693,7 @@ end
 -- best-case roll). Only meaningful in the wratio >= 1.5 branch, which
 -- holds for every weapon cap in the table.
 function M.attack_for_pdif_cap(p)
-    local weapon_cap = p.pdif_cap or M.PDIF_WEAPON_CAP[p.weapon or 'sword']
+    local weapon_cap = p.pdif_cap or get_profile(p.profile).pdif_caps[p.weapon or 'sword']
     local crit_add   = p.crit and 1 or 0
     local final_cap  = (weapon_cap + (p.damage_limit or 0)) * (1 + (p.damage_limit_p or 0)) + crit_add
 
@@ -721,8 +864,15 @@ end
       swings              total swings counted (capped at 8)
 ]]
 function M.ws_damage(p)
-    local ws    = p.ws
-    local alpha = p.alpha or M.alpha(p.attacker_level)
+    local ws      = p.ws
+    local profile = get_profile(p.profile)
+    local alpha   = p.alpha
+
+    if not alpha then
+        -- Legacy-era servers (USE_ADOULIN_WEAPON_SKILL_CHANGES off) use
+        -- the level-based alpha; Adoulin rules dropped it entirely.
+        alpha = profile.legacy_alpha and M.alpha(p.attacker_level) or 1
+    end
 
     local weapon_dmg  = p.weapon_dmg
     local offhand_dmg = p.offhand_dmg
@@ -784,6 +934,7 @@ function M.ws_damage(p)
         defense            = p.defense,
         weapon             = weapon,
         pdif_cap           = p.pdif_cap,
+        profile            = profile,
         ws_attack_mod      = atk_mod,
         ignored_def_factor = ignored_def,
         attacker_level     = p.attacker_level,
@@ -829,6 +980,7 @@ function M.ws_damage(p)
         level_correction = p.level_correction,
         h2h              = is_h2h,
         two_handed       = two_handed,
+        profile          = profile,
     }
 
     hit_params.acc_bonus = (p.bonus_acc or 0) + 100
@@ -905,6 +1057,7 @@ function M.melee_swing(p)
         defense          = p.defense,
         weapon           = p.weapon,
         pdif_cap         = p.pdif_cap,
+        profile          = p.profile,
         attacker_level   = p.attacker_level,
         target_level     = p.target_level,
         level_correction = p.level_correction,
@@ -930,6 +1083,7 @@ function M.melee_swing(p)
         h2h              = p.h2h,
         two_handed       = p.two_handed,
         offhand          = p.offhand,
+        profile          = p.profile,
         floor_percent    = true,
     })
 
