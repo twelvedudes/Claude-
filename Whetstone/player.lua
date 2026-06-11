@@ -29,6 +29,8 @@
       0x30 i16 atk          0x32 i16 def
 ]]
 
+local actionpacket = require('actionpacket')
+
 local M = {}
 
 local floor = math.floor
@@ -160,34 +162,12 @@ end
 -- 0x029 battle message: con-check results (check narrowing)
 -- =====================================================================
 
-M.PACKET_BATTLE_MESSAGE = 0x029
+M.PACKET_BATTLE_MESSAGE = actionpacket.PACKET_BATTLE_MESSAGE
 
--- GP_SERV_COMMAND_BATTLE_MESSAGE layout
--- (src/map/packets/s2c/0x029_battle_message.h, offsets include the
--- 4-byte FFXI header):
---   0x04 u32 UniqueNoCas   sender server id (the checking player)
---   0x08 u32 UniqueNoTar   target server id (the mob)
---   0x0C u32 Data          param  - for checks: mob level (GetMLevel
---                          + EXP_LVL_MOD)
---   0x10 u32 Data2         value  - for checks: 64 + EMobDifficulty
---   0x14 u16 ActIndexCas   0x16 u16 ActIndexTar
---   0x18 u16 MessageNum    0x1A u8 Type
-function M.parse_battle_message(data)
-    if #data < 0x1B then
-        return nil
-    end
-
-    return
-    {
-        sender_id  = u32(data, 0x04),
-        target_id  = u32(data, 0x08),
-        param      = i32(data, 0x0C),
-        value      = i32(data, 0x10),
-        sender_idx = u16(data, 0x14),
-        target_idx = u16(data, 0x16),
-        message_id = u16(data, 0x18),
-    }
-end
+-- 0x029 parsing lives in the SHARED actionpacket module (one parser
+-- for both addons; layout provenance documented there). Re-exported
+-- here so the check-narrowing path and its tests are unchanged.
+M.parse_battle_message = actionpacket.parse_battle_message
 
 -- /check message ids (src/map/packets/c2s/0x0dd_equip_inspect.cpp):
 -- the level-bearing message is CheckDefault = 174 (enums/msg_basic.h)
@@ -199,12 +179,10 @@ M.CHECK_MESSAGE_MIN  = 170
 M.CHECK_MESSAGE_MAX  = 178
 M.CHECK_IMPOSSIBLE   = 249
 
--- Mob death arrives on the SAME packet (mobentity.cpp OnDeath pushes
--- DefeatsTarget = 6 "<player> defeats <target>" and FallsToGround =
--- 20 "<target> falls to the ground", both with UniqueNoTar = the
--- dying mob). FFXI recycles server ids onto respawns, so a death
--- message is the signal to forget that id's checked level.
-M.DEATH_MESSAGES = { [6] = true, [20] = true }
+-- Mob death arrives on the SAME packet; the id set is shared with
+-- Telegraph (both addons evict id-keyed caches on death because ids
+-- recycle onto respawns) - provenance in shared/actionpacket.lua.
+M.DEATH_MESSAGES = actionpacket.DEATH_MESSAGES
 
 -- EMobDifficulty (src/map/utils/charutils.h), decoded from Data2 - 64.
 M.CHECK_DIFFICULTY =

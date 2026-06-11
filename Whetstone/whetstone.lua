@@ -59,9 +59,15 @@ addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
 
+-- shared/?.lua: actionpacket (the ONE 0x028/0x029 parser, shared with
+-- Telegraph). Releases bundle it into the addon folder; the extra
+-- ../shared path makes a raw git checkout work too. The require name
+-- is ALWAYS 'actionpacket' - a second name would mean a second module
+-- instance (the module-identity lesson).
 local addon_path = addon.path:gsub('\\', '/')
-package.path = string.format('%s?.lua;%sdata/?.lua;%s',
-    addon_path, addon_path, package.path)
+package.path = string.format(
+    '%s?.lua;%sdata/?.lua;%sshared/?.lua;%s../shared/?.lua;%s',
+    addon_path, addon_path, addon_path, addon_path, package.path)
 
 local formulas = require('formulas')
 local player   = require('player')
