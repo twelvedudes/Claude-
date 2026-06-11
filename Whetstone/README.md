@@ -33,6 +33,8 @@ questions a melee actually cares about:
 | `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `level`, `march`, `quest`, `profile`, `debug`, `target`, `selftest`) | **shaking down in the field (v0.1.x)** |
 | `config.lua` | Persisted user state: defaults, type-checked sanitize, sandboxed (de)serializer; Ashita settings lib backend wired in whetstone.lua | **done (v0.1.6)** |
 | `tests/test_config.lua` | Save/load round-trip, sanitize hardening, sandbox safety | **done (v0.1.6)** |
+| `narrow.lua` | Level narrowing: session pins + id-keyed con-check cache, precedence, recycling + degenerate-id guards | **done (v0.1.10)** |
+| `tests/test_narrow.lua` | The Wild Rabbit regression suite (id-only keying, latest-wins, structural assertion) | **done (v0.1.10)** |
 | `PROVENANCE.md` | Function-by-function ground-truth manifest + full enabled-module audit | **done** |
 
 > **Release packaging:** the generated tables (`data/mobs.lua`,
@@ -232,6 +234,33 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
+
+## Field fixes (v0.1.10)
+
+Live bug, exact repro: check one Wild Rabbit → Lv.4 (checked); every
+same-name rabbit then showed Lv.4 checked, and re-checking a
+different rabbit didn't update it. Two spec violations addressed at
+the structure level:
+
+- **All narrowing logic extracted to `narrow.lua`** (pure,
+  regression-tested): the con-check cache is keyed by entity SERVER
+  ID and nothing else — names appear on entries only as a recycling
+  tripwire (an id reused by a different species drops the entry),
+  never as a lookup key. Latest check ALWAYS overwrites. The four
+  required regression fixtures live in `tests/test_narrow.lua`:
+  (a) checking rabbit#1 leaves rabbit#2 unconfirmed, (b) checking
+  rabbit#2 doesn't touch rabbit#1, (c) re-checks always update,
+  (d) `assert_id_keyed` proves no name-keyed level structure exists —
+  also enforced LIVE by a new `/whet selftest` check.
+- **Degenerate-id guard**: the cache REFUSES id 0/nil on both write
+  and read. On HEAD the cache was already id-keyed by inspection, so
+  the live mechanism likely sits in the glue id plumbing (entity
+  lookup degrading on non-LSB servers and collapsing every mob onto
+  one shared key) — that failure mode is now structurally impossible,
+  and visible: a refused check prints `check NOT cached: invalid
+  server id`, the check line prints the id it cached under, and
+  `/whet panel` prints `narrow target=<name> server_id=<id> ->
+  level/source/check` so a constant or zero id names itself on sight.
 
 ## Field fixes (v0.1.9)
 

@@ -26,6 +26,7 @@ from pathlib import Path
 ADDON_FILES = [
     'whetstone.lua', 'formulas.lua', 'player.lua', 'advisor.lua',
     'ui.lua', 'swinglog.lua', 'selftest.lua', 'config.lua',
+    'narrow.lua',
     'README.md', 'PROVENANCE.md',
 ]
 

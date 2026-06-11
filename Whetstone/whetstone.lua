@@ -54,7 +54,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.9-beta'
+addon.version = '0.1.10-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -70,15 +70,10 @@ local ui       = require('ui')
 local swinglog = require('swinglog')
 local selftest = require('selftest')
 local config   = require('config')
+local narrow   = require('narrow')
 
 local state =
 {
-    -- SESSION-ONLY level pins, per mob name. Deliberately not
-    -- persisted (v0.1.8 field bug: a persisted pin silently overrode
-    -- fresh con checks - trash spawns vary across their band, so an
-    -- immortal name-pin is a trap). config.lua drops the legacy
-    -- persisted pins on load.
-    pins            = {},
     march_override  = nil,
     assume_quest_ws = false,
     debug_log       = false,
@@ -89,43 +84,12 @@ local state =
     latched_error   = nil,
 }
 
--- Con-check narrowing cache (0x029 battle messages): level keyed by
--- the mob's SERVER ID, not its name - two same-name spawns can con
--- different levels live. Cleared on zone change (server ids recycle);
--- a respawn can reuse an id at a different level, so a re-check
--- always overwrites. Precedence everywhere: pin > checked >
--- unconfirmed.
-local checked = { zone = nil, by_id = {} }
-
-local function checked_level_for(zone, server_id)
-    if checked.zone ~= zone then
-        return nil
-    end
-
-    local entry = checked.by_id[server_id]
-
-    return entry and entry.level or nil, entry
-end
-
-local function remember_check(zone, server_id, level, difficulty)
-    if checked.zone ~= zone then
-        checked = { zone = zone, by_id = {} }
-    end
-
-    checked.by_id[server_id] =
-    {
-        level      = level,
-        difficulty = difficulty,
-        at         = os.clock(),
-    }
-end
-
--- Entity-id recycling: a death message (0x029 ids 6/20) means this
--- server id is about to be reused by a respawn - a dead worm's level
--- must not haunt its replacement.
-local function forget_check(server_id)
-    checked.by_id[server_id] = nil
-end
+-- ALL level narrowing (session pins + the id-keyed con-check cache,
+-- precedence, recycling guards) lives in narrow.lua - pure and
+-- regression-tested offline after the v0.1.9 field bug ("every Wild
+-- Rabbit shows Lv.4 checked"). This file only plumbs ids in and
+-- resolved levels out.
+local nar = narrow.new()
 
 local data = { mobs = nil, ws = nil, items = nil }
 local mob_index = nil -- split layout: data/mobs/index.lua
@@ -548,11 +512,11 @@ ashita.events.register('command', 'whetstone_command', function(e)
         if not target.valid then
             print('[whetstone] level: no target to pin')
         elseif args[3] == nil or args[3] == 'clear' then
-            state.pins[target.name] = nil
+            narrow.unpin(nar, target.name)
             print(('[whetstone] pin cleared for %s')
                 :format(target.name))
         elseif tonumber(args[3]) then
-            state.pins[target.name] = tonumber(args[3])
+            narrow.pin(nar, target.name, tonumber(args[3]))
             print(('[whetstone] %s pinned at Lv.%d (session only - '
                 .. 'clears on reload)'):format(target.name,
                 tonumber(args[3])))
@@ -562,15 +526,16 @@ ashita.events.register('command', 'whetstone_command', function(e)
     elseif args[2] == 'pins' then
         local any = false
 
-        for name, level in pairs(state.pins) do
+        for name, level in pairs(nar.pins) do
             print(('[whetstone] pin (session): %s = Lv.%d')
                 :format(name, level))
             any = true
         end
 
-        for server_id, entry in pairs(checked.by_id) do
-            print(('[whetstone] checked (zone %s): id %d = Lv.%d (%s)')
-                :format(tostring(checked.zone), server_id, entry.level,
+        for server_id, entry in pairs(nar.by_id) do
+            print(('[whetstone] checked (zone %s): id %d %s= Lv.%d (%s)')
+                :format(tostring(nar.zone), server_id,
+                entry.name and (entry.name .. ' ') or '', entry.level,
                 tostring(entry.difficulty)))
             any = true
         end
@@ -677,6 +642,17 @@ ashita.events.register('command', 'whetstone_command', function(e)
         -- visible=true and an ok status names a dead render path.
         print(('[whetstone] panel: lines_rendered_last_frame=%s')
             :format(tostring(ui.lines_rendered)))
+        -- id plumbing for the narrowing cache: if server_id here is
+        -- 0/nil/constant across different mobs, the entity id source
+        -- is degenerate on this server and checks cannot key
+        if target.valid then
+            local level, source, check = narrow.resolve(nar, zone,
+                target.name, target.server_id)
+            print(('[whetstone] panel: narrow target=%s server_id=%s '
+                .. '-> level=%s source=%s check=%s'):format(
+                tostring(target.name), tostring(target.server_id),
+                tostring(level), tostring(source), tostring(check)))
+        end
         print(('[whetstone] panel: ids state=%s ui=%s ui.draw=%s '
             .. 'player.state=%s version=%s'):format(
             tostring(state), tostring(ui), tostring(ui.draw),
@@ -798,6 +774,12 @@ snapshot = function()
         JOB_NAMES[stats.main_job], stats.main_level,
         JOB_NAMES[stats.sub_job], stats.sub_level)
 
+    -- narrow.resolve owns the precedence (pin > checked >
+    -- unconfirmed) and every keying rule; both values travel so the
+    -- panel labels the level's source and surfaces conflicts.
+    local narrowed_level, narrow_source, check_level = narrow.resolve(
+        nar, zone, name, target.server_id)
+
     return
     {
         player =
@@ -844,23 +826,15 @@ snapshot = function()
                 and gear.sub.weapon.dmg or nil,
         },
         haste           = haste,
-        -- Narrowing precedence: session pin > 0x029 con-check (per
-        -- server id) > unconfirmed range. BOTH values travel so the
-        -- panel can label the level's source and surface a
-        -- pin-vs-check conflict instead of resolving it invisibly
-        -- (the v0.1.8 field bug).
         target          =
         {
-            zone  = zone,
-            name  = name,
-            level = state.pins[name]
-                or checked_level_for(zone, target.server_id),
-            level_source = (state.pins[name] and 'pinned')
-                or (checked_level_for(zone, target.server_id)
-                    and 'checked') or nil,
-            check_level  = checked_level_for(zone, target.server_id),
+            zone         = zone,
+            name         = name,
+            level        = narrowed_level,
+            level_source = narrow_source,
+            check_level  = check_level,
         },
-        checked_level   = checked_level_for(zone, target.server_id),
+        checked_level   = check_level,
         data            = { mobs = mobs, ws = data.ws,
                             items = data.items },
         profile         = cfg.profile,
@@ -998,8 +972,8 @@ write_session_header = function()
         buffs        = player.state.buffs,
         known_buffs  = player.BUFFS,
         target_name  = ok and snap and snap.target.name or nil,
-        pinned_level = ok and snap and state.pins[snap.target.name]
-            or nil,
+        pinned_level = ok and snap
+            and narrow.pin_for(nar, snap.target.name) or nil,
         checked_level = ok and snap and snap.checked_level or nil,
         level_range  = level_range,
         vintage      =
@@ -1174,6 +1148,19 @@ run_selftest = function()
             return ('zone %d: %d mob names'):format(zone, count)
         end },
 
+        { name = 'narrow_state', fn = function()
+            -- regression test (d) enforced LIVE: the checked cache
+            -- must be structurally id-keyed (narrow.lua invariant)
+            narrow.assert_id_keyed(nar)
+
+            local pins, checks = 0, 0
+            for _ in pairs(nar.pins) do pins = pins + 1 end
+            for _ in pairs(nar.by_id) do checks = checks + 1 end
+
+            return ('id-keyed OK; %d pins, %d checked (zone %s)')
+                :format(pins, checks, tostring(nar.zone))
+        end },
+
         { name = 'settings_backend', fn = function()
             -- v0.1.6 field bug: the settings lib threw on first load
             -- and unloaded the addon. The init is now pcall'd; this
@@ -1258,7 +1245,7 @@ ashita.events.register('packet_in', 'whetstone_check_packet',
             -- about to recycle this id onto a respawn whose level may
             -- differ.
             if player.DEATH_MESSAGES[message.message_id] then
-                forget_check(message.target_id)
+                narrow.forget(nar, message.target_id)
                 return
             end
 
@@ -1285,23 +1272,35 @@ ashita.events.register('packet_in', 'whetstone_check_packet',
 
             local zone = current_zone()
 
-            remember_check(zone, message.target_id, level, difficulty)
-
-            -- Name it when it concerns the current target.
+            -- The name is recorded only when the check concerns the
+            -- current target (the recycling tripwire in narrow.lua);
+            -- it is NEVER a lookup key.
             local target = get_current_target()
-            local label = (target.valid
-                and target.server_id == message.target_id)
-                and target.name or ('id ' .. message.target_id)
+            local is_current = target.valid
+                and target.server_id == message.target_id
+            local entry_name = is_current and target.name or nil
 
-            print(('[whetstone] check: %s is Lv.%d (%s)')
-                :format(label, level, difficulty))
+            local stored, why = narrow.remember_check(
+                nar, zone, message.target_id, level, difficulty,
+                entry_name, os.clock())
+
+            if not stored then
+                -- degenerate id source (the field failure mode this
+                -- guard exists for): say so instead of poisoning the
+                -- cache under a shared key
+                print('[whetstone] check NOT cached: ' .. tostring(why))
+                return
+            end
+
+            local label = entry_name or ('id ' .. message.target_id)
+
+            print(('[whetstone] check: %s (id %d) is Lv.%d (%s)')
+                :format(label, message.target_id, level, difficulty))
 
             -- A pin outranks the fresh check by design, but NEVER
             -- silently (the v0.1.8 field bug: panel said Lv.3 while
             -- our own check line said Lv.1).
-            local pin = target.valid
-                and target.server_id == message.target_id
-                and state.pins[target.name]
+            local pin = is_current and narrow.pin_for(nar, target.name)
 
             if pin and pin ~= level then
                 print(('[whetstone] check says Lv.%d but pin=%d '
