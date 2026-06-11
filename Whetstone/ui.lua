@@ -141,15 +141,28 @@ local function draw_body(report, haste, status)
     if target then
         local label = target.name or '?'
 
+        -- The level's SOURCE is always labeled (v0.1.8 field bug: a
+        -- persisted pin overrode a fresh check and the panel showed
+        -- a bare "(Lv.3)" - precedence worked, invisibly).
         if target.pinned_level then
-            label = string.format('%s (Lv.%d)', label, target.pinned_level)
+            local source = target.level_source or 'pinned'
+
+            if source == 'pinned' and target.check_level
+                and target.check_level ~= target.pinned_level then
+                -- conflict stays in the title until resolved
+                label = string.format('%s (Lv.%d pinned - check: %d)',
+                    label, target.pinned_level, target.check_level)
+            else
+                label = string.format('%s (Lv.%d, %s)', label,
+                    target.pinned_level, source)
+            end
         elseif target.level_min then
             if target.level_min == target.level_max then
-                label = string.format('%s (Lv.%d)', label, target.level_min)
+                label = string.format('%s (Lv.%d, exact)', label,
+                    target.level_min)
             else
-                label = string.format('%s (Lv.%d-%d%s)', label,
-                    target.level_min, target.level_max,
-                    target.ambiguous and ', unconfirmed' or '')
+                label = string.format('%s (Lv.%d-%d, unconfirmed)',
+                    label, target.level_min, target.level_max)
             end
         end
 

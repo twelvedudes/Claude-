@@ -699,6 +699,21 @@ describe('evaluate', function()
         assert.is_true(report.ws[1].expected > report.ws[2].expected)
     end)
 
+    it('passes level provenance through to the report target', function()
+        local report = evaluate(
+        {
+            target =
+            {
+                zone = 103, name = 'Test Crab', level = 21,
+                level_source = 'checked', check_level = 21,
+            },
+        })
+
+        assert.are.equal(21, report.target.pinned_level)
+        assert.are.equal('checked', report.target.level_source)
+        assert.are.equal(21, report.target.check_level)
+    end)
+
     it('never ranks magic/hybrid WS; surfaces them tagged instead', function()
         local report = evaluate()
 

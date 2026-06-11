@@ -199,6 +199,13 @@ M.CHECK_MESSAGE_MIN  = 170
 M.CHECK_MESSAGE_MAX  = 178
 M.CHECK_IMPOSSIBLE   = 249
 
+-- Mob death arrives on the SAME packet (mobentity.cpp OnDeath pushes
+-- DefeatsTarget = 6 "<player> defeats <target>" and FallsToGround =
+-- 20 "<target> falls to the ground", both with UniqueNoTar = the
+-- dying mob). FFXI recycles server ids onto respawns, so a death
+-- message is the signal to forget that id's checked level.
+M.DEATH_MESSAGES = { [6] = true, [20] = true }
+
 -- EMobDifficulty (src/map/utils/charutils.h), decoded from Data2 - 64.
 M.CHECK_DIFFICULTY =
 {

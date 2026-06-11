@@ -12,12 +12,16 @@
       assume_quest_ws  /whet quest toggle
       march_override   March potency override (fraction; 0 = unset)
       buff_overrides   { [effect_id] = fraction } user-pinned magnitudes
-      pinned_levels    { [mob_name] = level } target pins, per mob name
-                       (a pin is knowledge about the mob, so it
-                       survives reload and re-applies on retarget)
       profile          formulas profile name
       visible          panel visibility
       window_pos       { x, y } panel position
+
+    DELIBERATELY NOT PERSISTED: per-mob LEVEL pins. Trash spawns vary
+    (a Lv.1-6 worm respawns anywhere in the band) and an immortal
+    name-pin silently overrides fresh con checks forever - the v0.1.8
+    field bug. Level pins are session state in whetstone.lua;
+    sanitize() drops unknown keys, so the legacy pinned_levels key in
+    pre-v0.1.9 settings files is dropped on load (migration).
 ]]
 
 local M = {}
@@ -27,7 +31,6 @@ M.DEFAULTS =
     assume_quest_ws = false,
     march_override  = 0,
     buff_overrides  = {},
-    pinned_levels   = {},
     profile         = 'phoenix',
     visible         = true,
     window_pos      = { x = -1, y = -1 }, -- -1 = let ImGui place it
@@ -49,8 +52,8 @@ end
 
 -- Type-checked merge of loaded state over the defaults: unknown keys
 -- are dropped, type mismatches fall back to the default, map-style
--- tables (buff_overrides / pinned_levels) accept only sane entries.
--- A corrupt or stale settings file can never poison runtime state.
+-- tables (buff_overrides) accept only sane entries. A corrupt or
+-- stale settings file can never poison runtime state.
 function M.sanitize(loaded)
     local result = deep_copy(M.DEFAULTS)
 
@@ -76,14 +79,8 @@ function M.sanitize(loaded)
         end
     end
 
-    if type(loaded.pinned_levels) == 'table' then
-        for name, level in pairs(loaded.pinned_levels) do
-            if type(name) == 'string' and type(level) == 'number'
-                and level >= 1 and level <= 99 then
-                result.pinned_levels[name] = math.floor(level)
-            end
-        end
-    end
+    -- NOTE: loaded.pinned_levels (pre-v0.1.9) is deliberately ignored
+    -- here - level pins are session state now (see header).
 
     if type(loaded.profile) == 'string' then
         result.profile = loaded.profile

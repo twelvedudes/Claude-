@@ -71,8 +71,6 @@ describe('config round-trip', function()
             assume_quest_ws = true,
             march_override  = 0.140625,
             buff_overrides  = { [214] = 0.140625, [64] = 0.20 },
-            pinned_levels   = { ['Test Crab'] = 21,
-                                ["O'Kane's Crab"] = 30 },
             profile         = 'lsb',
             visible         = false,
             window_pos      = { x = 120, y = 340 },
@@ -84,12 +82,34 @@ describe('config round-trip', function()
         assert.near(0.140625, restored.march_override, 1e-12)
         assert.near(0.140625, restored.buff_overrides[214], 1e-12)
         assert.near(0.20, restored.buff_overrides[64], 1e-12)
-        assert.are.equal(21, restored.pinned_levels['Test Crab'])
-        assert.are.equal(30, restored.pinned_levels["O'Kane's Crab"])
         assert.are.equal('lsb', restored.profile)
         assert.is_false(restored.visible)
         assert.are.equal(120, restored.window_pos.x)
         assert.are.equal(340, restored.window_pos.y)
+    end)
+
+    it('drops legacy level pins from pre-v0.1.9 files (migration)', function()
+        -- v0.1.6-0.1.8 persisted pinned_levels, and an immortal
+        -- name-pin silently overrode fresh con checks (the v0.1.8
+        -- field bug). Loading an old file must shed the pins and
+        -- keep everything else.
+        local legacy = table.concat(
+        {
+            'return {',
+            '    assume_quest_ws = true,',
+            "    profile = 'lsb',",
+            '    pinned_levels = {',
+            "        ['Tunnel Worm'] = 3,",
+            "        ['Carrion Crow'] = 6,",
+            '    },',
+            '}',
+        }, '\n')
+
+        local restored = C.sanitize(C.deserialize(legacy))
+
+        assert.is_true(restored.assume_quest_ws)
+        assert.are.equal('lsb', restored.profile)
+        assert.is_nil(restored.pinned_levels)
     end)
 
     it('round-trips the defaults unchanged', function()
@@ -110,7 +130,6 @@ describe('sanitize hardening', function()
             assume_quest_ws = 'yes',           -- wrong type
             march_override  = 7,               -- out of range
             buff_overrides  = { [214] = 'x', a = 0.1, [33] = 0.15 },
-            pinned_levels   = { Crab = 250, Beetle = 12.7 },
             profile         = 42,
             window_pos      = { x = 'left' },
         })
@@ -119,8 +138,6 @@ describe('sanitize hardening', function()
         assert.are.equal(0, result.march_override)
         assert.is_nil(result.buff_overrides[214])
         assert.near(0.15, result.buff_overrides[33], 1e-12)
-        assert.is_nil(result.pinned_levels.Crab)   -- 250 out of range
-        assert.are.equal(12, result.pinned_levels.Beetle) -- floored
         assert.are.equal('phoenix', result.profile)
         assert.are.equal(-1, result.window_pos.x)
     end)

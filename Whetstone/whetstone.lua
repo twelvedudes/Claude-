@@ -12,9 +12,12 @@
 
     Commands:
       /whet              toggle the panel
-      /whet level <n>    pin the current target's level (checker info);
-                         persisted per mob name
-      /whet level        clear the pin (session + persisted)
+      /whet level <n>    pin the current target's level - SESSION
+                         ONLY, never persisted (trash spawns vary
+                         across their band; an immortal name-pin
+                         silently fights fresh checks)
+      /whet level [clear] clear the current target's pin
+      /whet pins         list active session pins + checked levels
       /whet march <pct>  set March potency override (e.g. 14.06)
       /whet march        clear the override
       /whet quest        toggle ranking of quest-locked WS (default off)
@@ -36,13 +39,14 @@
 
     Level narrowing: /check results (0x029) narrow the target's level
     automatically, cached per mob SERVER ID (same-name spawns can con
-    differently) until zone change. Precedence: pin > checked >
-    unconfirmed range.
+    differently) until zone change or that mob's death (ids recycle
+    onto respawns). Precedence: pin > checked > unconfirmed range -
+    and the panel ALWAYS labels the level's source; a pin beating a
+    fresh conflicting check is surfaced, never silent.
 
-    All user state (pins, march override, quest toggle, profile, panel
-    visibility/position) persists per character via the Ashita
-    settings library (config/whetstone/<char>_<server>/settings.lua),
-    with a file fallback in the addon folder.
+    Persisted per character via the Ashita settings library (march
+    override, buff overrides, quest toggle, profile, panel
+    visibility/position) - level pins are deliberately session-only.
 
     This file is Ashita glue and needs an in-game shakedown; everything
     it calls is unit-tested pure Lua.
@@ -50,7 +54,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.8-beta'
+addon.version = '0.1.9-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -69,7 +73,12 @@ local config   = require('config')
 
 local state =
 {
-    pinned_level    = nil,
+    -- SESSION-ONLY level pins, per mob name. Deliberately not
+    -- persisted (v0.1.8 field bug: a persisted pin silently overrode
+    -- fresh con checks - trash spawns vary across their band, so an
+    -- immortal name-pin is a trap). config.lua drops the legacy
+    -- persisted pins on load.
+    pins            = {},
     march_override  = nil,
     assume_quest_ws = false,
     debug_log       = false,
@@ -109,6 +118,13 @@ local function remember_check(zone, server_id, level, difficulty)
         difficulty = difficulty,
         at         = os.clock(),
     }
+end
+
+-- Entity-id recycling: a death message (0x029 ids 6/20) means this
+-- server id is about to be reused by a respawn - a dead worm's level
+-- must not haunt its replacement.
+local function forget_check(server_id)
+    checked.by_id[server_id] = nil
 end
 
 local data = { mobs = nil, ws = nil, items = nil }
@@ -527,15 +543,40 @@ ashita.events.register('command', 'whetstone_command', function(e)
     guarded('command:' .. tostring(args[2] or 'toggle'), function()
 
     if args[2] == 'level' then
-        state.pinned_level = tonumber(args[3]) -- nil clears
-
-        -- A pin is knowledge about the MOB: persist it per mob name so
-        -- it survives reload and re-applies on retarget.
         local target = get_current_target()
 
-        if target.valid then
-            cfg.pinned_levels[target.name] = state.pinned_level
-            save_config()
+        if not target.valid then
+            print('[whetstone] level: no target to pin')
+        elseif args[3] == nil or args[3] == 'clear' then
+            state.pins[target.name] = nil
+            print(('[whetstone] pin cleared for %s')
+                :format(target.name))
+        elseif tonumber(args[3]) then
+            state.pins[target.name] = tonumber(args[3])
+            print(('[whetstone] %s pinned at Lv.%d (session only - '
+                .. 'clears on reload)'):format(target.name,
+                tonumber(args[3])))
+        else
+            print('[whetstone] usage: /whet level <n> | clear')
+        end
+    elseif args[2] == 'pins' then
+        local any = false
+
+        for name, level in pairs(state.pins) do
+            print(('[whetstone] pin (session): %s = Lv.%d')
+                :format(name, level))
+            any = true
+        end
+
+        for server_id, entry in pairs(checked.by_id) do
+            print(('[whetstone] checked (zone %s): id %d = Lv.%d (%s)')
+                :format(tostring(checked.zone), server_id, entry.level,
+                tostring(entry.difficulty)))
+            any = true
+        end
+
+        if not any then
+            print('[whetstone] no active pins or checked levels')
         end
     elseif args[2] == 'march' then
         local pct = tonumber(args[3])
@@ -803,13 +844,22 @@ snapshot = function()
                 and gear.sub.weapon.dmg or nil,
         },
         haste           = haste,
-        -- Narrowing precedence: pin (session, then persisted per-mob)
-        -- > 0x029 con-check result (per server id) > unconfirmed range
-        target          = { zone = zone, name = name,
-                            level = state.pinned_level
-                                or cfg.pinned_levels[name]
-                                or checked_level_for(zone,
-                                    target.server_id) },
+        -- Narrowing precedence: session pin > 0x029 con-check (per
+        -- server id) > unconfirmed range. BOTH values travel so the
+        -- panel can label the level's source and surface a
+        -- pin-vs-check conflict instead of resolving it invisibly
+        -- (the v0.1.8 field bug).
+        target          =
+        {
+            zone  = zone,
+            name  = name,
+            level = state.pins[name]
+                or checked_level_for(zone, target.server_id),
+            level_source = (state.pins[name] and 'pinned')
+                or (checked_level_for(zone, target.server_id)
+                    and 'checked') or nil,
+            check_level  = checked_level_for(zone, target.server_id),
+        },
         checked_level   = checked_level_for(zone, target.server_id),
         data            = { mobs = mobs, ws = data.ws,
                             items = data.items },
@@ -948,8 +998,8 @@ write_session_header = function()
         buffs        = player.state.buffs,
         known_buffs  = player.BUFFS,
         target_name  = ok and snap and snap.target.name or nil,
-        pinned_level = state.pinned_level
-            or (ok and snap and cfg.pinned_levels[snap.target.name]),
+        pinned_level = ok and snap and state.pins[snap.target.name]
+            or nil,
         checked_level = ok and snap and snap.checked_level or nil,
         level_range  = level_range,
         vintage      =
@@ -1204,6 +1254,14 @@ ashita.events.register('packet_in', 'whetstone_check_packet',
                     message.target_id, message.param, message.value))
             end
 
+            -- Death/despawn first, from ANY killer: the server is
+            -- about to recycle this id onto a respawn whose level may
+            -- differ.
+            if player.DEATH_MESSAGES[message.message_id] then
+                forget_check(message.target_id)
+                return
+            end
+
             local kind, level, difficulty = player.classify_check(message)
 
             if not kind then
@@ -1237,6 +1295,19 @@ ashita.events.register('packet_in', 'whetstone_check_packet',
 
             print(('[whetstone] check: %s is Lv.%d (%s)')
                 :format(label, level, difficulty))
+
+            -- A pin outranks the fresh check by design, but NEVER
+            -- silently (the v0.1.8 field bug: panel said Lv.3 while
+            -- our own check line said Lv.1).
+            local pin = target.valid
+                and target.server_id == message.target_id
+                and state.pins[target.name]
+
+            if pin and pin ~= level then
+                print(('[whetstone] check says Lv.%d but pin=%d '
+                    .. 'active - /whet level clear to unpin')
+                    :format(level, pin))
+            end
 
             if state.debug_log then
                 append_log({ string.format(

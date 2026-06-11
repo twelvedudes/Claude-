@@ -233,6 +233,31 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
 
+## Field fixes (v0.1.9)
+
+Live bug: a persisted per-mob pin silently overrode a fresh con check
+("(Lv.3)" in the panel while the check line said Lv.1 — precedence
+worked exactly as designed, invisibly). Fixes:
+
+- **Every level is labeled with its source**: `(Lv.3, pinned)` /
+  `(Lv.1, checked)` / `(Lv.5, exact)` (single-level DB spawn) /
+  `(Lv.1-6, unconfirmed)`. A bare level can no longer appear.
+- **Conflicts surface instead of resolving silently**: when a check
+  arrives for the current target and a pin wins anyway, chat says
+  `check says Lv.1 but pin=3 active - /whet level clear to unpin`
+  and the title shows `(Lv.3 pinned - check: 1)` until resolved.
+- **Level pins are session-only now** — never persisted. Trash spawns
+  vary across their band; an immortal name-pin is a trap. Old
+  settings files shed their `pinned_levels` key on load (migration
+  via sanitize; tested). March/buff overrides, quest toggle, profile
+  and panel position remain persisted. `/whet pins` lists active
+  session pins and checked levels; `/whet level clear` unpins.
+- **Entity-id recycling handled**: mob death arrives on the same
+  0x029 packet we already parse (`DefeatsTarget=6` /
+  `FallsToGround=20`, target = the dying mob — mobentity.cpp
+  OnDeath), and a death drops that id's checked level so a dead
+  worm's con can't haunt the respawn that inherits its id.
+
 ## Consolidated phase (v0.1.8)
 
 - **0x029 check narrowing**: `/check` results narrow the target's

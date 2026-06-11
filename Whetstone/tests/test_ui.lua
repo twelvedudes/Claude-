@@ -55,6 +55,12 @@ if type(describe) ~= 'function' then
                 error((msg or 'assert.is_true') .. ': got ' .. tostring(value), 2)
             end
         end,
+
+        is_nil = function(value, msg)
+            if value ~= nil then
+                error((msg or 'assert.is_nil') .. ': got ' .. tostring(value), 2)
+            end
+        end,
     },
     {
         __call = function(_, ...)
@@ -211,6 +217,68 @@ describe('ui rendering', function()
         assert.is_true(text:find('%[S4%] Test Crab %(Lv%.20%-25, unconfirmed%)') ~= nil)
         assert.is_true(text:find('~ %+90 acc to cap') ~= nil)
         assert.is_true(text:find('  %+1 STR') ~= nil)
+    end)
+
+    it('labels every level with its source - never bare', function()
+        -- v0.1.8 field bug: a persisted pin showed "(Lv.3)" while the
+        -- check line said Lv.1 - right precedence, invisible source
+        local function title_for(target)
+            reset(true)
+            ui.draw({ target = target, lines = {}, ws = {} }, nil,
+                    { state = 'ok' })
+            return texts()
+        end
+
+        assert.is_true(title_for(
+            { name = 'Worm', pinned_level = 3,
+              level_source = 'pinned' })
+            :find('Worm %(Lv%.3, pinned%)') ~= nil)
+
+        assert.is_true(title_for(
+            { name = 'Worm', pinned_level = 1,
+              level_source = 'checked', check_level = 1 })
+            :find('Worm %(Lv%.1, checked%)') ~= nil)
+
+        assert.is_true(title_for(
+            { name = 'Lizard', level_min = 5, level_max = 5 })
+            :find('Lizard %(Lv%.5, exact%)') ~= nil)
+
+        assert.is_true(title_for(
+            { name = 'Worm', level_min = 1, level_max = 6 })
+            :find('Worm %(Lv%.1%-6, unconfirmed%)') ~= nil)
+    end)
+
+    it('keeps a pin-vs-check conflict in the title until resolved', function()
+        reset(true)
+        ui.draw(
+        {
+            target =
+            {
+                name = 'Tunnel Worm', pinned_level = 3,
+                level_source = 'pinned', check_level = 1,
+            },
+            lines = {}, ws = {},
+        }, nil, { state = 'ok' })
+
+        assert.is_true(texts():find(
+            'Tunnel Worm %(Lv%.3 pinned %- check: 1%)') ~= nil)
+    end)
+
+    it('shows no conflict when the check agrees with the pin', function()
+        reset(true)
+        ui.draw(
+        {
+            target =
+            {
+                name = 'Tunnel Worm', pinned_level = 3,
+                level_source = 'pinned', check_level = 3,
+            },
+            lines = {}, ws = {},
+        }, nil, { state = 'ok' })
+
+        assert.is_true(texts():find(
+            'Tunnel Worm %(Lv%.3, pinned%)') ~= nil)
+        assert.is_nil(texts():find('check:'))
     end)
 
     it('shows the haste footer with the gear-exact split', function()

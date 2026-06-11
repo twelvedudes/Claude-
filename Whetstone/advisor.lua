@@ -337,6 +337,10 @@ function M.evaluate(p)
             level = p.target.level,
         })
     target.name = target.name or p.target.name
+    -- level provenance rides through to the panel: the level's source
+    -- is ALWAYS labeled, and a pin beating a fresh check is surfaced
+    target.level_source = target.level_source or p.target.level_source
+    target.check_level  = target.check_level or p.target.check_level
 
     if #target.points == 0 then
         return { target = target, lines = {}, ws = {},
