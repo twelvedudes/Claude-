@@ -99,6 +99,18 @@ Enabled-module **SQL** touching consumed tables:
 | One bar per actor | the server AI runs one state per entity (`ai_container`); a second start replaces the live bar (outcome `replaced` in validation events) |
 | Bar-clear signal set | the four source paths in the parsing table: interrupt FourCCs, finishes, the MagicFinish failure paths, death/zone |
 
+## Extractors (Phase 2)
+
+| Extractor | Ground truth | Module SQL handled | Pinned-commit run |
+| --- | --- | --- | --- |
+| `Telegraph/tools/extract_spells.py` | `sql/spell_list.sql` (spellid, name, castTime in **ms** — `spell.cpp` loads with `std::chrono::milliseconds`) | applies every castTime UPDATE from the enabled modules (60 applied: soa/magic_adjustments 47+, wotg, abyssea); 206 non-consumed-column updates ignored (CE/VE, jobs, mpCost-only); an applied-class update matching NO spell raises | 893 spells (the dump's other 35 `INSERT` lines are commented out — prefix counter skips comments, books balance) |
+| `Telegraph/tools/extract_mobskills.py` | `sql/mob_skills.sql` (mob_skill_id, name, `mob_prepare_time` ms → `setActivationTime`, `mob_skill_flag` & 0x004 → `isTpFreeSkill`) — flag cells use `SET @SKILLFLAG_*` variables, resolved with a loud failure on unknown forms | no enabled module touches mob_skills (collection still runs; any future UPDATE on a consumed column raises) | 2,546 skills (2,071 with windup, 155 tp-free; 1,798 commented-out retail rows correctly excluded) |
+| `Whetstone/tools/extract_mobs.py` (extended) | adds `mob_pools.cmbSkill/cmbDelay` (`mobutils.cpp` weapon setup) and TP mods 73/289/368/488/973 from `mob_pool_mods`/`mob_species_mods` (is_mob_mod = 0 rows only) to every entry | unchanged (dyna + limbus pool inserts flow through the same row parser) | 12,625 entries / 101,586 spawn rows accounted; 2,274 entries carry tp_mods |
+
+Generated tables are vintage-stamped (`vintage = 'phoenixffxi/Phoenix
+@ 0f3f8fc'`) and load in Lua 5.1; like Whetstone's they are gitignored
+but REQUIRED at runtime (release zips bundle them).
+
 ## Phase status
 
 | File | Role | Status |
@@ -109,8 +121,8 @@ Enabled-module **SQL** touching consumed tables:
 | `Telegraph/tests/test_tpledger.lua` | hand-derived formula transcript + ledger lifecycle | **done (Phase 1)** |
 | `Telegraph/castbar.lua` | cast/windup bar state machine | **done (Phase 1)** |
 | `Telegraph/tests/test_castbar.lua` | bar lifecycle, unknown-id hardening | **done (Phase 1)** |
-| `Telegraph/tools/extract_spells.py` | spell id → name/castTime (+ module updates) | Phase 2 |
-| `Telegraph/tools/extract_mobskills.py` | skill id → name/windup/tp_free | Phase 2 |
-| Whetstone `tools/extract_mobs.py` extension | cmbDelay/cmbSkill + TP mob mods per entry | Phase 2 |
+| `Telegraph/tools/extract_spells.py` + tests | spell id → name/castTime (+ module updates) | **done (Phase 2)** |
+| `Telegraph/tools/extract_mobskills.py` + tests | skill id → name/windup/tp_free | **done (Phase 2)** |
+| Whetstone `tools/extract_mobs.py` extension | cmbDelay/cmbSkill + TP mob mods per entry | **done (Phase 2)** |
 | `Telegraph/telegraph.lua` + ui/selftest/config | glue (pcall-latched), TextUnformatted UI, `/tele` | Phase 3 |
 | `Telegraph/tools/analyze_telegraph.py` | TP_ESTIMATE / CAST_TIME verdicts | Phase 4 |

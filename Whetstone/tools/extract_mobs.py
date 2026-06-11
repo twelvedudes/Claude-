@@ -29,13 +29,20 @@ Data sources (all parsed with a self-contained INSERT parser, one
 tuple per line as dumped by LSB):
     sql/mob_spawn_points.sql   mob name + groupid + minLevel/maxLevel
     sql/mob_groups.sql         (zoneid, groupid) -> poolid
-    sql/mob_pools.sql          poolid -> speciesid, mJob, sJob
+    sql/mob_pools.sql          poolid -> speciesid, mJob, sJob,
+                               cmbSkill/cmbDelay (Telegraph TP feed)
     sql/mob_species_system.sql speciesID -> family stat/def ranks
-    sql/mob_pool_mods.sql      flat DEF/EVA modifier overrides
-    sql/mob_species_mods.sql   flat DEF/EVA modifier overrides
+    sql/mob_pool_mods.sql      flat DEF/EVA + TP mod overrides
+    sql/mob_species_mods.sql   flat DEF/EVA + TP mod overrides
     sql/skill_ranks.sql        per-job evasion skill ranks
     sql/traits.sql             job traits carrying DEF/EVA modifiers
     src/map/zone.h             ZONEID enum (subjob-zone list)
+
+Each emitted entry also carries the sibling Telegraph addon's TP
+inputs: cmb_delay + h2h (mobutils.cpp weapon setup -> tp.lua per-swing
+TP), and tp_mods (STORETP 73 / SUBTLE_BLOW 289 / REGAIN 368 /
+INHIBIT_TP 488 / SUBTLE_BLOW_II 973) where a pool or species mod row
+sets them.
 
 Usage:
     python3 tools/extract_mobs.py --server /path/to/Phoenix \
@@ -93,6 +100,19 @@ JOB_NAMES = [
 
 MOD_DEF = 1   # src/map/modifier.h Mod::DEF
 MOD_EVA = 68  # src/map/modifier.h Mod::EVA
+
+# TP-relevant mods consumed by Telegraph's tpledger (modifier.h):
+# STORETP 73, SUBTLE_BLOW 289, INHIBIT_TP 488, REGAIN 368 (value x10:
+# 20 = 2% TP per 3s tick), SUBTLE_BLOW_II 973. Aggregated per pool /
+# species exactly like the DEF/EVA mods; is_mob_mod = 1 rows are a
+# different namespace (mobMods) and are never mods.
+TP_MOD_NAMES = {
+    73: 'store_tp',
+    289: 'subtle_blow',
+    368: 'regain',
+    488: 'inhibit_tp',
+    973: 'subtle_blow_2',
+}
 
 # mobutils.cpp CheckSubJobZone: original + RoZ zones where mob subjobs
 # contribute via GetSubJobStats below sub level 50 (flat /2 elsewhere).
@@ -559,7 +579,8 @@ class ServerData:
 
     CONSUMED_COLUMNS = {
         'mob_species_system': {'speciesID', 'VIT', 'AGI', 'DEF', 'family'},
-        'mob_pools': {'poolid', 'speciesid', 'mJob', 'sJob', 'mobType'},
+        'mob_pools': {'poolid', 'speciesid', 'mJob', 'sJob', 'mobType',
+                      'cmbSkill', 'cmbDelay'},
         'mob_groups': {'groupid', 'poolid', 'zoneid'},
         'mob_spawn_points': {'mobid', 'mobname', 'groupid',
                              'minLevel', 'maxLevel'},
@@ -620,7 +641,10 @@ class ServerData:
                 'def_rank': row[17],
             }
 
-        # poolid -> pool info
+        # poolid -> pool info. cmbSkill/cmbDelay feed Telegraph's TP
+        # ledger: mobutils.cpp loads them straight onto the main
+        # weapon (setSkillType / setBaseDelay), and cmbSkill 1 =
+        # SKILL_HAND_TO_HAND halves the TP delay (tp.lua mob branch).
         self.pools = {}
         for row in rows('mob_pools'):
             self.pools[row[0]] = {
@@ -628,6 +652,8 @@ class ServerData:
                 'species': row[3],
                 'mjob': row[5],
                 'sjob': row[6],
+                'cmb_skill': row[7],
+                'cmb_delay': row[8],
                 'mob_type': row[14],
             }
 
@@ -648,8 +674,9 @@ class ServerData:
                 'max_level': max_lvl,
             })
 
-        # flat DEF/EVA mods
+        # flat DEF/EVA mods + the TP-relevant mods (Telegraph)
         self.pool_mods = defaultdict(lambda: {'def': 0, 'eva': 0})
+        self.pool_tp_mods = defaultdict(dict)
         for row in rows('mob_pool_mods'):
             poolid, modid, value, is_mob_mod = row[:4]
             if not is_mob_mod:
@@ -657,8 +684,13 @@ class ServerData:
                     self.pool_mods[poolid]['def'] += value
                 elif modid == MOD_EVA:
                     self.pool_mods[poolid]['eva'] += value
+                elif modid in TP_MOD_NAMES:
+                    name = TP_MOD_NAMES[modid]
+                    self.pool_tp_mods[poolid][name] = \
+                        self.pool_tp_mods[poolid].get(name, 0) + value
 
         self.species_mods = defaultdict(lambda: {'def': 0, 'eva': 0})
+        self.species_tp_mods = defaultdict(dict)
         for row in rows('mob_species_mods'):
             speciesid, modid, value, is_mob_mod = row[:4]
             if not is_mob_mod:
@@ -666,6 +698,10 @@ class ServerData:
                     self.species_mods[speciesid]['def'] += value
                 elif modid == MOD_EVA:
                     self.species_mods[speciesid]['eva'] += value
+                elif modid in TP_MOD_NAMES:
+                    name = TP_MOD_NAMES[modid]
+                    self.species_tp_mods[speciesid][name] = \
+                        self.species_tp_mods[speciesid].get(name, 0) + value
 
         # per-job evasion skill rank (skill_ranks row 'evasion';
         # job columns follow the JOBTYPE enum order, WAR..RUN).
@@ -873,6 +909,14 @@ def extract(data: ServerData, zones=None) -> tuple:
         for level in range(row['min_level'], row['max_level'] + 1):
             levels[level] = data.stats_at_level(zone, poolid, level)
 
+        # TP-relevant mob mods (pool + species, summed) for Telegraph;
+        # omitted when empty so the common case costs nothing.
+        tp_mods = {}
+        for source in (data.species_tp_mods.get(pool['species'], {}),
+                       data.pool_tp_mods.get(poolid, {})):
+            for name, value in source.items():
+                tp_mods[name] = tp_mods.get(name, 0) + value
+
         entry = {
             'group': row['group'],
             'pool': poolid,
@@ -882,6 +926,11 @@ def extract(data: ServerData, zones=None) -> tuple:
             'sjob': JOB_NAMES[pool['sjob']],
             'family': data.species[pool['species']]['family'],
             'nm': bool(pool['mob_type'] & 0x02),
+            # mob_pools.cmbDelay / cmbSkill == 1 (hand_to_hand):
+            # Telegraph's per-swing TP feed (mobutils.cpp weapon setup)
+            'cmb_delay': pool['cmb_delay'],
+            'h2h': pool['cmb_skill'] == 1,
+            'tp_mods': tp_mods,
             'levels': levels,
         }
         output[zone].setdefault(row['name'].replace('_', ' '),
@@ -914,15 +963,24 @@ def emit_zone_body(zone_mobs: dict, indent: str) -> list:
                 % (level, s['vit'], s['agi'], s['def'], s['eva'])
                 for level, s in sorted(e['levels'].items()))
 
+            tp_mods = ''
+            if e.get('tp_mods'):
+                tp_mods = 'tp_mods = { %s }, ' % ', '.join(
+                    '%s = %d' % (key, value)
+                    for key, value in sorted(e['tp_mods'].items()))
+
             lines.append(
                 '%s    { min_level = %d, max_level = %d, '
                 'mjob = %s, sjob = %s, family = %s, nm = %s, '
-                'group = %d, levels = { %s } },'
+                'group = %d, cmb_delay = %d, h2h = %s, %s'
+                'levels = { %s } },'
                 % (indent, e['min_level'], e['max_level'],
                    lua_string(e['mjob']), lua_string(e['sjob']),
                    lua_string(e['family']),
                    'true' if e['nm'] else 'false',
-                   e['group'], level_rows))
+                   e['group'], e['cmb_delay'],
+                   'true' if e['h2h'] else 'false',
+                   tp_mods, level_rows))
 
         lines.append('%s},' % indent)
 

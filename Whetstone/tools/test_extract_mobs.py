@@ -71,11 +71,16 @@ enum ZONEID : uint16
 };
 """
 
-# 28 columns; only 0 (poolid), 1 (name), 3 (speciesid), 5 (mJob),
-# 6 (sJob), 14 (mobType) are read.
+# 28 columns; 0 (poolid), 1 (name), 3 (speciesid), 5 (mJob), 6 (sJob),
+# 7 (cmbSkill), 8 (cmbDelay), 14 (mobType) are read.
 POOL_ROW = ("INSERT INTO `mob_pools` VALUES "
             "(%d,'%s','%s',%d,0x01,%d,%d,2,240,100,0,0,0,0,%d,"
             "0,0,0,0,0,0,0,1,0,0,0,4,4);")
+
+# variant with explicit cmbSkill/cmbDelay (h2h fixture)
+POOL_ROW_CMB = ("INSERT INTO `mob_pools` VALUES "
+                "(%d,'%s','%s',%d,0x01,%d,%d,%d,%d,100,0,0,0,0,%d,"
+                "0,0,0,0,0,0,0,1,0,0,0,4,4);")
 
 FIXTURE_SQL = {
     'mob_species_system.sql': [
@@ -93,6 +98,8 @@ FIXTURE_SQL = {
         POOL_ROW % (502, 'Rock_Crab', 'Rock_Crab', 10, 1, 13, 0),  # WAR/NIN
         POOL_ROW % (503, 'Pool_Crab', 'Pool_Crab', 11, 1, 0, 0),
         POOL_ROW % (504, 'Mod_Crab', 'Mod_Crab', 10, 1, 0, 2),  # NM flag
+        # MNK-style puncher: cmbSkill 1 (hand_to_hand), cmbDelay 480
+        POOL_ROW_CMB % (505, 'Fist_Crab', 'Fist_Crab', 10, 2, 0, 1, 480, 0),
     ],
     'mob_groups.sql': [
         "INSERT INTO `mob_groups` VALUES (1,500,1,'Snipper',0,128,0,0,0,0,NULL);",
@@ -100,6 +107,7 @@ FIXTURE_SQL = {
         "INSERT INTO `mob_groups` VALUES (3,503,1,'Pool_Crab',0,128,0,0,0,0,NULL);",
         "INSERT INTO `mob_groups` VALUES (4,504,1,'Mod_Crab',0,128,0,0,0,0,NULL);",
         "INSERT INTO `mob_groups` VALUES (5,501,1,'Sub_Crab',0,128,0,0,0,0,NULL);",
+        "INSERT INTO `mob_groups` VALUES (6,505,1,'Fist_Crab',0,128,0,0,0,0,NULL);",
         "INSERT INTO `mob_groups` VALUES (1,501,100,'Sub_Crab',0,128,0,0,0,0,NULL);",
     ],
     'mob_spawn_points.sql': [
@@ -117,6 +125,8 @@ FIXTURE_SQL = {
         "(16781317,0,'Mod_Crab','Mod Crab',4,20,20,1.0,1.0,1.0,0);",
         "INSERT INTO `mob_spawn_points` VALUES "
         "(16781318,0,'Sub_Crab','Sub Crab',5,30,30,1.0,1.0,1.0,0);",
+        "INSERT INTO `mob_spawn_points` VALUES "
+        "(16781319,0,'Fist_Crab','Fist Crab',6,20,20,1.0,1.0,1.0,0);",
         # zone 100 mobid: 0x1000000 | (100 << 12) | 1 = 17186817
         "INSERT INTO `mob_spawn_points` VALUES "
         "(17186817,0,'Sub_Crab','Sub Crab',1,30,30,1.0,1.0,1.0,0);",
@@ -134,9 +144,16 @@ FIXTURE_SQL = {
     'mob_pool_mods.sql': [
         "INSERT INTO `mob_pool_mods` VALUES (504,1,12,0);",   # +12 DEF
         "INSERT INTO `mob_pool_mods` VALUES (504,68,99,1);",  # mobMod: ignore
+        # Telegraph TP mods: REGAIN 368 / STORETP 73 on the NM pool
+        "INSERT INTO `mob_pool_mods` VALUES (504,368,20,0);",
+        "INSERT INTO `mob_pool_mods` VALUES (504,73,10,0);",
+        # is_mob_mod = 1 with a TP mod id is a mobMod, NOT a modifier
+        "INSERT INTO `mob_pool_mods` VALUES (504,368,99,1);",
     ],
     'mob_species_mods.sql': [
         "INSERT INTO `mob_species_mods` VALUES (11,68,20,0);",  # +20 EVA
+        # species-level SUBTLE_BLOW joins pool-level TP mods
+        "INSERT INTO `mob_species_mods` VALUES (10,289,5,0);",
     ],
 }
 
@@ -258,6 +275,45 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(88, e['levels'][20]['def'])
         self.assertEqual(68, e['levels'][20]['eva'])
         self.assertTrue(e['nm'])
+
+    def test_combat_delay_and_h2h(self):
+        # mob_pools cmbDelay/cmbSkill feed Telegraph's TP ledger:
+        # the fixture POOL_ROW carries cmbSkill 2 / cmbDelay 240
+        e = self.entry(1, 'Snipper')
+
+        self.assertEqual(240, e['cmb_delay'])
+        self.assertFalse(e['h2h'])
+
+        # cmbSkill 1 = SKILL_HAND_TO_HAND
+        fist = self.entry(1, 'Fist Crab')
+
+        self.assertEqual(480, fist['cmb_delay'])
+        self.assertTrue(fist['h2h'])
+
+    def test_tp_mods_aggregate_pool_and_species(self):
+        # Mod Crab: pool 504 REGAIN 20 + STORETP 10 (is_mob_mod=0),
+        # species 10 SUBTLE_BLOW 5; the is_mob_mod=1 REGAIN row is a
+        # mobMod and must be ignored
+        e = self.entry(1, 'Mod Crab')
+
+        self.assertEqual(
+            {'regain': 20, 'store_tp': 10, 'subtle_blow': 5},
+            e['tp_mods'])
+
+        # Pool Crab (species 11) has no TP mods at all
+        self.assertEqual({}, self.entry(1, 'Pool Crab')['tp_mods'])
+
+    def test_tp_fields_reach_the_lua(self):
+        text = X.emit_lua(self.mobs, 'fixture')
+
+        self.assertIn('cmb_delay = 240, h2h = false', text)
+        self.assertIn('cmb_delay = 480, h2h = true', text)
+        self.assertIn(
+            'tp_mods = { regain = 20, store_tp = 10, subtle_blow = 5 }',
+            text)
+        # entries without TP mods stay lean
+        self.assertNotIn('tp_mods = {  }', text)
+        self.assertNotIn('tp_mods = { }', text)
 
     def test_split_emission_balances_across_zones(self):
         with tempfile.TemporaryDirectory() as out:
