@@ -19,8 +19,11 @@
       /whet debug        toggle predicted-vs-observed swing logging to
                          <addon>/whetstone_swings.log (writes a full
                          session-state header on enable)
-      /whet selftest     exercise every Ashita glue call and write
-                         <addon>/whetstone_selftest.log
+      /whet selftest     exercise every Ashita glue call (via the
+                         SAME production paths the panel uses) and
+                         write <addon>/whetstone_selftest.log
+      /whet target       print raw target index / server id / name /
+                         zone and whether the mob DB lookup hits
 
     This file is Ashita glue and needs an in-game shakedown; everything
     it calls is unit-tested pure Lua.
@@ -28,7 +31,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.1-beta'
+addon.version = '0.1.2-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -52,6 +55,8 @@ local state =
     debug_log       = false,
     last_report     = nil,
     last_haste      = nil,
+    last_status     = nil,
+    latched_error   = nil,
 }
 
 local data = { mobs = nil, ws = nil, items = nil }
@@ -81,6 +86,7 @@ local run_selftest
 -- 60 errors a second or - worse - taking the whole addon down and
 -- killing packet logging with it (HorizonXI shakedown, v0.1.0-beta).
 local error_latch = {}
+local append_error -- forward declaration
 
 local function guarded(name, fn, ...)
     local args = { ... }
@@ -92,15 +98,16 @@ local function guarded(name, fn, ...)
 
     if not ok and not error_latch[name] then
         error_latch[name] = true
+        state.latched_error = state.latched_error or name
 
-        local message = ('[whetstone] %s failed - disabled until '
-            .. 'reload, everything else keeps running'):format(name)
+        -- Chat scrolls away; the full traceback goes to the error
+        -- file and the panel shows a persistent red ERROR line.
+        print(('[whetstone] %s failed - latched, see '
+            .. 'whetstone_error.log; everything else keeps running')
+            :format(name))
 
-        print(message)
-
-        if append_log then
-            append_log({ string.format('%s ERROR %s: %s',
-                os.date('%H:%M:%S'), name, tostring(err)) })
+        if append_error then
+            append_error(name, err)
         end
     end
 
@@ -147,8 +154,13 @@ local function mobs_for_zone(zone)
         -- silently empty panel
         if not error_latch[module_name] then
             error_latch[module_name] = true
+            state.latched_error = state.latched_error or module_name
             print(('[whetstone] failed to load %s: %s')
                 :format(module_name, tostring(zone_table)))
+
+            if append_error then
+                append_error(module_name, zone_table)
+            end
         end
 
         return nil
@@ -184,6 +196,61 @@ local TWO_HANDED =
     great_sword = true, great_axe = true, scythe = true,
     polearm = true, great_katana = true, staff = true,
 }
+
+-- THE one target reader. Used by snapshot, /whet target AND the
+-- selftest closure - the v0.1.1 field bug was the selftest reading
+-- the target one way while the panel read it another, so 12/12
+-- passed against a path production never executed.
+--
+-- Canonical Ashita v4 pattern (official addons - distance, tparty,
+-- skeletonkey): global GetEntity(index) from common, field access on
+-- the returned entity_t.
+local function get_current_target()
+    local target_mgr = AshitaCore:GetMemoryManager():GetTarget()
+
+    if target_mgr == nil then
+        return { valid = false, reason = 'target manager unavailable' }
+    end
+
+    -- Use the sub-target slot while the <st> cursor is up.
+    local slot = 0
+    local ok_st, st_active = pcall(function()
+        return target_mgr:GetIsSubTargetActive()
+    end)
+
+    if ok_st and st_active == 1 then
+        slot = 1
+    end
+
+    local index = target_mgr:GetTargetIndex(slot)
+
+    if index == nil or index == 0 then
+        return { valid = false, reason = 'no target', index = 0 }
+    end
+
+    local entity = GetEntity(index)
+    local name = entity and entity.Name or nil
+    local server_id = (entity and entity.ServerId)
+        or target_mgr:GetServerId(slot)
+
+    if name == nil or name == '' then
+        return { valid = false, reason = 'entity has no name',
+                 index = index, server_id = server_id }
+    end
+
+    return
+    {
+        valid     = true,
+        index     = index,
+        server_id = server_id,
+        name      = name,
+        slot      = slot,
+    }
+end
+
+local function current_zone()
+    return AshitaCore:GetMemoryManager():GetParty():GetMemberZone(0)
+end
 
 ashita.events.register('load', 'whetstone_load', function()
     -- Prefer the split per-zone layout; fall back to monolithic.
@@ -228,6 +295,32 @@ ashita.events.register('command', 'whetstone_command', function(e)
         if state.debug_log then
             write_session_header()
         end
+    elseif args[2] == 'target' then
+        local target = get_current_target()
+        local zone = current_zone()
+
+        print(('[whetstone] target: valid=%s reason=%s index=%s '
+            .. 'server_id=%s name=%s zone=%s slot=%s'):format(
+            tostring(target.valid), tostring(target.reason),
+            tostring(target.index), tostring(target.server_id),
+            tostring(target.name), tostring(zone),
+            tostring(target.slot)))
+
+        if target.valid then
+            local mobs = mobs_for_zone(zone)
+            local entries = mobs and mobs[zone]
+                and mobs[zone][target.name]
+
+            if entries then
+                print(('[whetstone] mob DB: HIT - %d candidate '
+                    .. 'entr%s'):format(#entries,
+                    #entries == 1 and 'y' or 'ies'))
+            else
+                print('[whetstone] mob DB: MISS - name not in this '
+                    .. "zone's table (player/NPC, custom server mob, "
+                    .. 'or name mismatch)')
+            end
+        end
     elseif args[2] == 'selftest' then
         run_selftest()
     else
@@ -235,42 +328,39 @@ ashita.events.register('command', 'whetstone_command', function(e)
     end
 end)
 
--- Build the advisor input from live state. Returns nil without a
--- valid melee target / parsed char packets (0x061 AND 0x062 both
--- arrive at zone-in; no accuracy guessing - if skills are not parsed
--- yet, we wait rather than mislead).
+
+-- Build the advisor input from live state.
+-- Returns snap, haste, status - status ALWAYS set, with a distinct
+-- state per failure mode so the panel never collapses everything
+-- into "No target." (the v0.1.1 field bug's second half):
+--   'waiting_packets' | 'no_target' | 'no_zone_data' | 'no_weapon'
+--   | 'ok'
 local function snapshot()
     local stats = player.state.char_stats
     local skills = player.state.skills
 
     if not stats or not skills then
-        return nil
+        return nil, nil, { state = 'waiting_packets' }
     end
 
     player.refresh()
 
-    local target_manager = AshitaCore:GetMemoryManager():GetTarget()
-    local target_index = target_manager:GetTargetIndex(0)
+    local target = get_current_target()
 
-    if target_index == 0 then
-        return nil
+    if not target.valid then
+        return nil, nil, { state = 'no_target',
+                           detail = target.reason }
     end
 
-    local entity = AshitaCore:GetMemoryManager():GetEntity()
-    local name = entity:GetName(target_index)
-    local zone = AshitaCore:GetMemoryManager():GetParty()
-        :GetMemberZone(0)
-
-    if not name or name == '' then
-        return nil
-    end
+    local name = target.name
+    local zone = current_zone()
 
     -- Per-zone mob table (split layout) or the monolithic fallback;
     -- loading swaps the previous zone out of the 32-bit heap.
     local mobs = mobs_for_zone(zone)
 
     if not mobs then
-        return nil
+        return nil, nil, { state = 'no_zone_data', detail = zone }
     end
 
     local gear = player.gear_stats(player.state.equipment,
@@ -278,7 +368,8 @@ local function snapshot()
     local main = gear.main and gear.main.weapon
 
     if not main then
-        return nil
+        return nil, nil, { state = 'no_weapon',
+                           detail = player.state.equipment[0] }
     end
 
     local two_handed = TWO_HANDED[main.skill] or false
@@ -346,7 +437,7 @@ local function snapshot()
         -- 75-era original zones are level-corrected; post-ToAU zones
         -- mostly not. TODO: zone table; default on for now.
         level_correction = true,
-    }, haste
+    }, haste, { state = 'ok' }
 end
 
 -- Refresh swinglog expectations from the latest advisor pass.
@@ -427,6 +518,16 @@ append_log = function(lines)
             file:write(line, '\n')
         end
 
+        file:close()
+    end
+end
+
+append_error = function(name, traceback)
+    local file = io.open(addon_path .. 'whetstone_error.log', 'a')
+
+    if file then
+        file:write(string.format('=== %s %s ===\n%s\n',
+            os.date('%Y-%m-%d %H:%M:%S'), name, tostring(traceback)))
         file:close()
     end
 end
@@ -514,10 +615,54 @@ run_selftest = function()
             return resolved .. ' item ids resolved'
         end },
 
-        { name = 'target_manager', fn = function()
-            local target = AshitaCore:GetMemoryManager():GetTarget()
-            expect(target ~= nil, 'GetTarget returned nil')
-            return 'target_index=' .. tostring(target:GetTargetIndex(0))
+        { name = 'target_resolution', fn = function()
+            -- THE production path: same function the panel uses. The
+            -- v0.1.1 selftest read the target its own way and passed
+            -- 12/12 while the panel showed "No target." forever.
+            local target = get_current_target()
+
+            if target.valid then
+                return ('index=%d server_id=%s name=%s'):format(
+                    target.index, tostring(target.server_id),
+                    target.name)
+            end
+
+            expect(target.reason == 'no target',
+                'production target read failed: '
+                .. tostring(target.reason))
+            return 'no target selected (select a mob to test '
+                .. 'resolution)'
+        end },
+
+        { name = 'target_mob_db', fn = function()
+            local target = get_current_target()
+
+            if not target.valid then
+                return 'skipped (no target)'
+            end
+
+            local zone = current_zone()
+            local mobs = mobs_for_zone(zone)
+            local entries = mobs and mobs[zone]
+                and mobs[zone][target.name]
+
+            if entries then
+                return ('HIT: %d entries for %s in zone %d'):format(
+                    #entries, target.name, zone)
+            end
+
+            return ('MISS: %s not in zone %d table (expected on '
+                .. 'custom servers)'):format(target.name, zone)
+        end },
+
+        { name = 'snapshot_status', fn = function()
+            -- The FULL production pipeline, status and all.
+            local snap, _, status = snapshot()
+
+            return ('state=%s detail=%s snap=%s'):format(
+                tostring(status and status.state),
+                tostring(status and status.detail),
+                snap and 'built' or 'nil')
         end },
 
         { name = 'party_info', fn = function()
@@ -624,7 +769,9 @@ ashita.events.register('d3d_present', 'whetstone_present', function()
     -- Data path: latched separately so a UI bug cannot starve
     -- swinglog expectations (and vice versa).
     guarded('advisor_update', function()
-        local snap, haste = snapshot()
+        local snap, haste, status = snapshot()
+
+        state.last_status = status
 
         if snap then
             local report = advisor.evaluate(snap)
@@ -632,6 +779,10 @@ ashita.events.register('d3d_present', 'whetstone_present', function()
             state.last_report = report
             state.last_haste = haste
             update_expectations(snap, report)
+        else
+            -- NEVER render a stale report over a changed situation
+            state.last_report = nil
+            state.last_haste = nil
         end
     end)
 
@@ -639,5 +790,9 @@ ashita.events.register('d3d_present', 'whetstone_present', function()
         return -- UI is down; packet logging stays alive
     end
 
-    guarded('ui.draw', ui.draw, state.last_report, state.last_haste)
+    local status = state.last_status or {}
+    status.latched_error = state.latched_error
+
+    guarded('ui.draw', ui.draw, state.last_report, state.last_haste,
+            status)
 end)

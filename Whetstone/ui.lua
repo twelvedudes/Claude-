@@ -30,13 +30,44 @@ local COLOR_GAIN      = { 0.55, 1.00, 0.55, 1.0 }
 local COLOR_INFO      = { 0.70, 0.70, 0.70, 1.0 }
 local COLOR_ESTIMATED = { 1.00, 0.85, 0.45, 1.0 }
 local COLOR_HEADER    = { 0.95, 0.95, 1.00, 1.0 }
+local COLOR_ERROR     = { 1.00, 0.35, 0.35, 1.0 }
 
 local MAX_LINES = 6
 
+-- Every snapshot failure mode renders DISTINCTLY - the v0.1.1 field
+-- bug collapsed five different states into one eternal "No target."
+local STATE_TEXT =
+{
+    waiting_packets = 'Waiting for char data - change zones or jobs '
+        .. 'once to trigger 0x061/0x062.',
+    no_target       = 'No target.',
+}
+
 -- Window body, only rendered when Begin() returned true.
-local function draw_body(report, haste)
+local function draw_body(report, haste, status)
+    status = status or {}
+
+    -- A latched subsystem error outranks everything: stale-looking
+    -- silence is how the last bug hid.
+    if status.latched_error then
+        imgui.TextColored(COLOR_ERROR, string.format(
+            'ERROR (latched): %s - see whetstone_error.log',
+            status.latched_error))
+    end
+
     if not report then
-        imgui.TextColored(COLOR_INFO, 'No target.')
+        if status.state == 'no_zone_data' then
+            imgui.TextColored(COLOR_INFO, string.format(
+                'No mob data for zone %s.', tostring(status.detail)))
+        elseif status.state == 'no_weapon' then
+            imgui.TextColored(COLOR_INFO, string.format(
+                'Mainhand not in item DB (id %s).',
+                tostring(status.detail)))
+        else
+            imgui.TextColored(COLOR_INFO,
+                STATE_TEXT[status.state] or 'No target.')
+        end
+
         return
     end
 
@@ -69,7 +100,14 @@ local function draw_body(report, haste)
     end
 
     if report.error then
-        imgui.TextColored(COLOR_INFO, report.error)
+        if report.error == 'unknown mob' then
+            imgui.TextColored(COLOR_INFO, string.format(
+                'Target: %s (not in mob DB for this zone)',
+                tostring(report.target and report.target.name or '?')))
+        else
+            imgui.TextColored(COLOR_INFO, report.error)
+        end
+
         return
     end
 
@@ -104,7 +142,7 @@ local function draw_body(report, haste)
     end
 end
 
-function M.draw(report, haste)
+function M.draw(report, haste, status)
     if not M.visible[1] then
         return
     end
@@ -114,7 +152,7 @@ function M.draw(report, haste)
     -- Canonical Ashita v4 shape: End() runs regardless of Begin().
     if imgui.Begin('Whetstone', M.visible,
                    ImGuiWindowFlags_NoScrollbar) then
-        draw_body(report, haste)
+        draw_body(report, haste, status)
     end
 
     imgui.End()

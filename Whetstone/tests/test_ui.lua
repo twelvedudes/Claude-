@@ -228,6 +228,60 @@ describe('ui rendering', function()
     end)
 end)
 
+-- =====================================================================
+describe('ui status states (never one catch-all)', function()
+    it('distinguishes waiting-for-packets from no-target', function()
+        reset(true)
+        ui.draw(nil, nil, { state = 'waiting_packets' })
+
+        assert.is_true(texts():find('Waiting for char data') ~= nil)
+    end)
+
+    it('names the zone when mob data is missing', function()
+        reset(true)
+        ui.draw(nil, nil, { state = 'no_zone_data', detail = 142 })
+
+        assert.is_true(texts():find('No mob data for zone 142.') ~= nil)
+    end)
+
+    it('names the item id when the mainhand misses the item DB', function()
+        reset(true)
+        ui.draw(nil, nil, { state = 'no_weapon', detail = 17440 })
+
+        assert.is_true(
+            texts():find('Mainhand not in item DB %(id 17440%).') ~= nil)
+    end)
+
+    it('shows the target name when the mob is not in the DB', function()
+        reset(true)
+        ui.draw(
+        {
+            target = { name = 'Custom Horizon Mob' },
+            lines = {}, ws = {},
+            error = 'unknown mob',
+        }, nil, { state = 'ok' })
+
+        assert.is_true(texts():find(
+            'Target: Custom Horizon Mob %(not in mob DB for this zone%)')
+            ~= nil)
+    end)
+
+    it('renders the latched error line above everything', function()
+        reset(true)
+        ui.draw(nil, nil, { state = 'no_target',
+                            latched_error = 'advisor_update' })
+
+        local text = texts()
+
+        assert.is_true(text:find(
+            'ERROR %(latched%): advisor_update %- see '
+            .. 'whetstone_error.log') ~= nil)
+        -- the state line still renders after it
+        assert.is_true(text:find('No target.') ~= nil)
+        assert.are.equal(1, count('End'))
+    end)
+end)
+
 if WHETSTONE_TEST_SUMMARY then
     WHETSTONE_TEST_SUMMARY()
 end

@@ -30,7 +30,7 @@ questions a melee actually cares about:
 | `tests/test_advisor.lua` | Routing guard, disambiguation, ranking, WS gating tests | **done (Phase 4/5)** |
 | `ui.lua` | One-glance ImGui panel (renders advisor output) | **done; v4 binding verified vs official addons + stub-tested** |
 | `swinglog.lua` | `/whet debug` predicted-vs-observed logging (0x028 action parser) | **done (Phase 5, needs in-game shakedown)** |
-| `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `level`, `march`, `quest`, `debug`) | **done (Phase 5, needs in-game shakedown)** |
+| `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `level`, `march`, `quest`, `debug`, `target`, `selftest`) | **shaking down in the field (v0.1.x)** |
 | `PROVENANCE.md` | Function-by-function ground-truth manifest + full enabled-module audit | **done** |
 
 > **Release packaging:** the generated tables (`data/mobs.lua`,

@@ -376,12 +376,17 @@ local function read_equipment_ashita()
         local entry = inventory:GetEquippedItem(slot)
 
         if entry and entry.Index ~= 0 then
-            -- Index packs container in the high byte, index in the low.
+            -- Index packs container in the high byte, index in the low
+            -- (verified vs equipmon, which also rejects the 0/65535
+            -- sentinel ids).
             local container = floor(entry.Index / 256)
             local index = entry.Index % 256
             local item = inventory:GetContainerItem(container, index)
+            local id = item and item.Id or nil
 
-            equipment[slot] = item and item.Id or nil
+            if id and id > 0 and id ~= 65535 then
+                equipment[slot] = id
+            end
         end
     end
 
