@@ -809,6 +809,55 @@ describe('crit rate', function()
 end)
 
 -- =====================================================================
+describe('hand-to-hand / unarmed', function()
+    it('matches the natural damage formula floor(skill*0.11)+3', function()
+        -- MNK h2h skill caps: Lv.1 = 6, Lv.9 = 30, Lv.75 = 269
+        assert.are.equal(3, F.h2h_natural(6))    -- floor(0.66) + 3
+        assert.are.equal(6, F.h2h_natural(30))   -- floor(3.3) + 3
+        assert.are.equal(32, F.h2h_natural(269)) -- floor(29.59) + 3
+        assert.are.equal(3, F.h2h_natural(0))    -- bare minimum
+        assert.are.equal(3, F.h2h_natural(nil))
+    end)
+
+    it('defines the unarmed pseudo-weapons from itemutils', function()
+        assert.are.equal(0, F.UNARMED_H2H.dmg)
+        assert.are.equal(480, F.UNARMED_H2H.delay)
+        assert.are.equal('hand_to_hand', F.UNARMED_H2H.skill)
+        assert.are.equal(3, F.UNARMED.dmg)
+    end)
+
+    it('reads Martial Arts tiers from the traits table', function()
+        -- MNK: L1 80, L16 100, ..., L75 180 (traits.sql mod 173)
+        assert.are.equal(80, F.martial_arts('MNK', 1))
+        assert.are.equal(80, F.martial_arts('MNK', 9))
+        assert.are.equal(80, F.martial_arts('MNK', 15))
+        assert.are.equal(100, F.martial_arts('MNK', 16))
+        assert.are.equal(180, F.martial_arts('MNK', 75))
+        assert.are.equal(120, F.martial_arts('PUP', 75))
+        assert.are.equal(0, F.martial_arts('WAR', 75))
+        assert.are.equal(0, F.martial_arts('MNK', 0))
+    end)
+
+    it('produces the era barehanded MNK delays at 1/9/75', function()
+        -- 480 units - MA, x1000/60 ms:
+        --   Lv.1/9 (MA 80): 400u -> 6666.67ms; Lv.75 (MA 180): 5000ms
+        assert.near(6666.6667, F.weapon_delay_ms(
+            { delay = 480, martial_arts = F.martial_arts('MNK', 1) }),
+            0.01)
+        assert.near(6666.6667, F.weapon_delay_ms(
+            { delay = 480, martial_arts = F.martial_arts('MNK', 9) }),
+            0.01)
+        assert.near(5000, F.weapon_delay_ms(
+            { delay = 480, martial_arts = F.martial_arts('MNK', 75) }),
+            1e-9)
+    end)
+
+    it('weapon rank for unarmed H2H is (0+3)/9 = 0', function()
+        assert.are.equal(0, F.weapon_rank(F.UNARMED_H2H.dmg, true))
+    end)
+end)
+
+-- =====================================================================
 describe('weapon skill damage', function()
     -- Shared scenario:
     --   D 50, fSTR 6, STR 100 with 50% mod -> WSC 50, alpha 0.83

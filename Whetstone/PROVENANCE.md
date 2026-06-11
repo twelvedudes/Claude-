@@ -73,6 +73,11 @@ Adjacent but out of the damage model (documented, not modeled):
 | Slow | dMND-scaled (white magic) / fixed Hojo tiers sharing effect 13 → estimated |
 | March | skill+instrument dependent (`enhancing_song.lua`) → estimated, user-overridable |
 | Last Resort 2H haste | `modules/soa/lua/job_adjustments.lua` — merit-dependent → estimated |
+| Unarmed pseudo-weapons (H2H: D 0; plain: D 3; delay 480 = ctor 8000 ms) | `src/map/utils/itemutils.cpp` `do_init` singletons; selection rule (H2H skill rank on main OR sub job, empty sub slot) `charutils.cpp` `CheckUnarmedWeapon` (~6869) |
+| H2H natural damage `floor(skill*0.11)+3`, both fists | `physical_utilities.lua` `calculateAttackDamage` H2H branch / `weaponskills.lua` `getMeleeDmg` |
+| Martial Arts delay tiers (MNK 80→180 L1-75, PUP 80→120; +200 L82 ABYSSEA) | `traits.sql` trait 23, modifier 173 (`Mod::MARTIAL_ARTS`); applied in `battleentity.cpp` `GetWeaponDelay` (units × 1000/60 ms) |
+| H2H item delay convention: SQL stores weapon delay + 480 | `itemutils.cpp` DPS comment ("Weapon Delay+(240*2)") — the generated item DB's delay for H2H weapons already includes the base |
+| **OUT OF MODEL**: Kick Attacks / Footwork kicks (extra kick swings, `Mod::KICK_DMG`), H2H +3 rank adjustment is modeled but kick damage rounds are not | `calculateAttackDamage` KICK branch — revisit if MNK swing logs show unexplained extra swings |
 | Gear crit mods (advisor `crit_rate_bonus`/`crit_dmg_bonus`) | `item_mods.sql` Mod 165 `CRITHITRATE` + Mod 421 `CRIT_DMG_INCREASE` (whitelisted, exact via item DB) — out of model: Mod 964 `RANGED_CRIT_DMG_INCREASE`, Mod 563 `MAGIC_CRIT_DMG_INCREASE` (no ranged/magic crit damage in the advisor), Mod 908 `CRIT_DEF_BONUS` (mob-side; nets against crit_dmg in `melee_pdif` if ever supplied) |
 
 | Extractor | Ground truth | Module SQL handled |

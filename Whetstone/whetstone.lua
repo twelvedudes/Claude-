@@ -33,7 +33,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.3-beta'
+addon.version = '0.1.4-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -82,6 +82,11 @@ end
 local append_log
 local write_session_header
 local run_selftest
+local snapshot -- defined after the data helpers; captured by the
+               -- command handler (the /whet panel crash was this name
+               -- resolving as a nil GLOBAL - third member of the
+               -- upvalue-capture family after append_log and
+               -- get_current_target)
 
 -- One-time error latch: a broken subsystem (the UI especially) logs
 -- its full traceback ONCE and goes quiet, instead of either spamming
@@ -300,7 +305,14 @@ ashita.events.register('command', 'whetstone_command', function(e)
         return
     end
 
+    -- Block BEFORE dispatch: even if the command body errors, the
+    -- game must not see '/whet ...' as a chat line.
     e.blocked = true
+
+    -- Latched like d3d_present: a broken command logs its traceback
+    -- to whetstone_error.log and the addon stays loaded (the /whet
+    -- panel crash unloaded the whole addon).
+    guarded('command:' .. tostring(args[2] or 'toggle'), function()
 
     if args[2] == 'level' then
         state.pinned_level = tonumber(args[3]) -- nil clears
@@ -384,6 +396,7 @@ ashita.events.register('command', 'whetstone_command', function(e)
     else
         ui.visible[1] = not ui.visible[1]
     end
+    end)
 end)
 
 
@@ -393,7 +406,7 @@ end)
 -- into "No target." (the v0.1.1 field bug's second half):
 --   'waiting_packets' | 'no_target' | 'no_zone_data' | 'no_weapon'
 --   | 'ok'
-local function snapshot()
+snapshot = function()
     local stats = player.state.char_stats
     local skills = player.state.skills
 
@@ -426,8 +439,32 @@ local function snapshot()
     local main = gear.main and gear.main.weapon
 
     if not main then
-        return nil, nil, { state = 'no_weapon',
-                           detail = player.state.equipment[0] }
+        local main_id = player.state.equipment[0]
+
+        if main_id == nil then
+            -- EMPTY main slot: the server equips an unarmed pseudo-
+            -- weapon (itemutils.cpp do_init; charutils.cpp
+            -- CheckUnarmedWeapon): H2H-capable characters get the H2H
+            -- one. Client-side proxy for "has an H2H skill rank":
+            -- a nonzero parsed H2H skill. Modeled as H2H either way
+            -- (the no-skill case still punches: natural damage 3).
+            local h2h = skills.by_name.hand_to_hand
+            local h2h_value = h2h and h2h.value or 0
+
+            main =
+            {
+                skill   = 'hand_to_hand',
+                dmg     = h2h_value > 0 and formulas.UNARMED_H2H.dmg
+                          or formulas.UNARMED.dmg,
+                delay   = formulas.UNARMED_H2H.delay,
+                unarmed = true,
+            }
+        else
+            -- S2w now means EXACTLY this: an id is equipped but the
+            -- item DB has no weapon for it (custom-server item or
+            -- non-weapon in the slot).
+            return nil, nil, { state = 'no_weapon', detail = main_id }
+        end
     end
 
     local two_handed = TWO_HANDED[main.skill] or false
@@ -477,9 +514,21 @@ local function snapshot()
             crit_dmg_bonus  = (gear.crit_dmg or 0) / 100,
             weapon    =
             {
-                dmg   = main.dmg,
-                delay = main.delay,
-                skill = main.skill,
+                dmg       = main.dmg,
+                delay     = main.delay,
+                skill     = main.skill,
+                unarmed   = main.unarmed or nil,
+                -- natural damage / WS H2H handling need the skill level
+                h2h_skill = main.skill == 'hand_to_hand'
+                            and skill_value or nil,
+                -- Martial Arts delay reduction (traits.sql via
+                -- formulas; MNK/PUP only) and the 2-swing round
+                martial_arts = main.skill == 'hand_to_hand'
+                    and formulas.martial_arts(
+                        JOB_NAMES[stats.main_job] or '?',
+                        stats.main_level) or nil,
+                swings_per_round = main.skill == 'hand_to_hand'
+                    and formulas.H2H_SWINGS_PER_ROUND or 1,
             },
             offhand_dmg = gear.sub and gear.sub.weapon
                 and gear.sub.weapon.dmg or nil,
@@ -538,7 +587,9 @@ local function update_expectations(snap, report)
 
     local swing = formulas.melee_swing(
     {
-        weapon_dmg       = weapon.dmg,
+        -- H2H-aware: includes natural damage for fist swings, so the
+        -- logged base matches what the server actually rolls against
+        weapon_dmg       = advisor.effective_weapon_dmg(weapon),
         fstr             = formulas.fstr(snap.player.stats.str,
                                          worst.stats.vit, rank),
         attack           = snap.player.attack,

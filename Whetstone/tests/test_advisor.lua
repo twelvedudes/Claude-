@@ -329,6 +329,99 @@ describe('apples-to-apples guard', function()
 end)
 
 -- =====================================================================
+describe('barehanded MNK (unarmed H2H pseudo-weapon)', function()
+    -- Field bug (HorizonXI v0.1.3): an empty MNK main slot dead-ended
+    -- in S2w. The unarmed pseudo-weapon (itemutils.cpp: D 0, skill
+    -- H2H) must flow through the full model.
+    local MNK =
+    {
+        level     = 75,
+        main_job  = 'MNK',
+        stats     = { str = 80, dex = 80, vit = 70, agi = 70,
+                      int = 50, mnd = 50, chr = 50 },
+        attack    = 380,
+        accuracy  = 320,
+        ws_skill  = 269,
+        weapon    = { dmg = 0, delay = 480, skill = 'hand_to_hand',
+                      h2h_skill = 269, unarmed = true,
+                      swings_per_round = 2 },
+    }
+
+    it('adds natural damage to the unarmed D of 0', function()
+        -- floor(269 * 0.11) + 3 = 32 on a 0-damage pseudo-weapon
+        assert.are.equal(32, A.effective_weapon_dmg(MNK.weapon))
+    end)
+
+    it('leaves non-H2H weapons untouched', function()
+        assert.are.equal(81, A.effective_weapon_dmg(
+            { dmg = 81, skill = 'great_axe' }))
+    end)
+
+    it('evaluates a full report barehanded', function()
+        local report = evaluate({ player = MNK })
+
+        -- no error path; ranked lines exist; fSTR rank is the
+        -- unarmed (0+3)/9 = 0 rank (visible via the fstr line's
+        -- presence rather than a crash)
+        assert.is_nil(report.error)
+        assert.is_true(#report.lines > 0)
+
+        -- great_axe fixture WS are unusable barehanded: h2h fixture
+        -- DB has none, so the ws list must be empty, not crashing
+        assert.are.equal(0, #report.ws)
+    end)
+
+    it('ranks an H2H weapon skill using the skill level', function()
+        local ws_db =
+        {
+            raging_fists =
+            {
+                id = 8, skill = 'hand_to_hand', skill_level = 5,
+                element = 0, kind = 'physical', source = 'wotg_module',
+                main_only = false, unlock_id = 0, jobs = { 'MNK' },
+                sc = {},
+                params = { numHits = 5, ftpMod = { 1.0, 1.0, 1.0 },
+                           str_wsc = 0.3 },
+            },
+        }
+
+        local report = evaluate(
+        {
+            player = MNK,
+            data = { mobs = MOB_DB, ws = ws_db },
+        })
+
+        assert.are.equal(1, #report.ws)
+        assert.are.equal('raging_fists', report.ws[1].name)
+
+        -- apples-to-apples: must equal the direct formulas call with
+        -- the unarmed D + h2h_skill routed through the h2h path,
+        -- against the worst candidate (B: Lv.25 def 300 eva 350)
+        local expected = F.ws_damage(
+        {
+            weapon_dmg       = 0,
+            offhand_dmg      = 0,
+            h2h_skill        = 269,
+            fstr             = F.fstr(80, 30, 0),
+            stats            = MNK.stats,
+            ws               = { ftp = { 1.0, 1.0, 1.0 }, num_hits = 5,
+                                 mods = { str = 0.3 } },
+            tp               = 1000,
+            attack           = 380,
+            defense          = 300,
+            acc              = 320,
+            eva              = 350,
+            attacker_level   = 75,
+            target_level     = 25,
+            weapon           = 'hand_to_hand',
+            target_agi       = 30,
+        }).expected
+
+        assert.near(expected, report.ws[1].expected, 1e-9)
+    end)
+end)
+
+-- =====================================================================
 describe('mob candidates', function()
     it('looks up exact per-level rows (no interpolation)', function()
         local entry = MOB_DB[103]['Test Crab'][1]

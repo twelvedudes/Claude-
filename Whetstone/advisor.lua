@@ -83,6 +83,21 @@ function M.adapt_ws_params(entry)
     }
 end
 
+-- Auto-attack base damage for a weapon table. H2H swings add the
+-- natural damage floor(skill * 0.11) + 3 to the weapon's D on BOTH
+-- fists (physical_utilities.lua calculateAttackDamage, H2H branch;
+-- unarmed pseudo-weapon D is 0, itemutils.cpp). Weapon RANK, by
+-- contrast, uses the raw D (+3 H2H adjustment) WITHOUT the natural
+-- part - battleentity.cpp GetMainWeaponRank.
+function M.effective_weapon_dmg(weapon)
+    if weapon.skill == 'hand_to_hand' then
+        return (weapon.dmg or 0)
+            + formulas.h2h_natural(weapon.h2h_skill)
+    end
+
+    return weapon.dmg
+end
+
 -- =====================================================================
 -- Mob candidate handling
 -- =====================================================================
@@ -263,7 +278,7 @@ function M.evaluate(p)
 
         return formulas.melee_swing(
         {
-            weapon_dmg       = weapon.dmg,
+            weapon_dmg       = M.effective_weapon_dmg(weapon),
             fstr             = overrides.fstr or formulas.fstr(
                 player.stats.str, point.stats.vit, weapon_rank, profile),
             attack           = overrides.attack or player.attack,

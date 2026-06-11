@@ -386,6 +386,11 @@ local function read_equipment_ashita()
 
             if id and id > 0 and id ~= 65535 then
                 equipment[slot] = id
+            else
+                -- SOMETHING is equipped but its id is unreadable:
+                -- must not be mistaken for an empty slot (empty main
+                -- slot means unarmed H2H, not S2w)
+                equipment[slot] = -1
             end
         end
     end

@@ -893,6 +893,62 @@ function M.crit_info(dex, target_agi)
 end
 
 -- =====================================================================
+-- Hand-to-hand / unarmed
+-- =====================================================================
+
+-- Unarmed pseudo-weapons (itemutils.cpp do_init): when nothing is in
+-- the main slot, the server equips one of two singletons
+-- (charutils.cpp CheckUnarmedWeapon, ~6869): H2H-capable jobs (main OR
+-- sub job with an H2H skill rank) get the H2H item, everyone else the
+-- plain one. Delay is the CItemWeapon constructor default 8000 ms =
+-- 480 units. NOTE: equipped H2H weapons store delay in item_weapon.sql
+-- as weapon delay + 480 ("Weapon Delay+(240*2)", itemutils.cpp DPS
+-- comment), so the generated item DB's delay column for H2H weapons
+-- ALREADY includes the base 480.
+M.UNARMED_H2H = { dmg = 0, delay = 480, skill = 'hand_to_hand' }
+M.UNARMED     = { dmg = 3, delay = 480, skill = 'none' }
+
+-- Natural H2H damage added to BOTH hands' base damage
+-- (physical_utilities.lua: naturalH2hDamage / weaponskills.lua
+-- getMeleeDmg): floor(skill * 0.11) + 3.
+function M.h2h_natural(h2h_skill)
+    return floor((h2h_skill or 0) * 0.11) + 3
+end
+
+-- H2H attack rounds swing twice (main + sub fist), weaponskills.lua /
+-- attack round handling. Kick Attacks / Footwork are OUT OF MODEL
+-- (see PROVENANCE.md).
+M.H2H_SWINGS_PER_ROUND = 2
+
+-- Martial Arts delay reduction in DELAY UNITS, from traits.sql
+-- (trait 23, modifier 173 = Mod::MARTIAL_ARTS): subtracted from the
+-- weapon delay before haste (battleentity.cpp GetWeaponDelay).
+M.MARTIAL_ARTS =
+{
+    MNK = { { 1, 80 }, { 16, 100 }, { 31, 120 }, { 46, 140 },
+            { 61, 160 }, { 75, 180 }, { 82, 200 } },
+    PUP = { { 25, 80 }, { 50, 100 }, { 75, 120 } },
+}
+
+function M.martial_arts(job, level)
+    local tiers = M.MARTIAL_ARTS[job]
+
+    if not tiers then
+        return 0
+    end
+
+    local value = 0
+
+    for _, tier in ipairs(tiers) do
+        if level >= tier[1] then
+            value = tier[2]
+        end
+    end
+
+    return value
+end
+
+-- =====================================================================
 -- Expected weapon skill damage
 -- weaponskills.lua: doPhysicalWeaponskill + calculateRawWSDmg
 -- =====================================================================
