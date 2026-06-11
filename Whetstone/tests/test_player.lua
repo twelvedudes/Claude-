@@ -288,7 +288,8 @@ end)
 local ITEM_DB =
 {
     [15457] = { name = 'swift_belt', level = 50, jobs = 4194303, slots = 1024,
-                mods = { haste = 400, acc = 3, att = -5 } },
+                mods = { haste = 400, acc = 3, att = -5 },
+                latent_mods = { 'acc', 'racc' } },
     [12701] = { name = 'dusk_gloves', level = 72, jobs = 4194303, slots = 64,
                 mods = { haste = 300, att = 5 } },
     [12555] = { name = 'haubergeon', level = 59, jobs = 4194303, slots = 32,
@@ -334,6 +335,23 @@ describe('gear stats', function()
 
         assert.are.equal(0, #sparse.pieces)
         assert.are.equal(0, sparse.haste_raw)
+    end)
+
+    it('surfaces latent flags on pieces without summing them', function()
+        local belt
+
+        for _, piece in ipairs(gear.pieces) do
+            if piece.name == 'swift_belt' then
+                belt = piece
+            else
+                assert.is_nil(piece.latent_mods)
+            end
+        end
+
+        assert.are.equal('acc', belt.latent_mods[1])
+        assert.are.equal('racc', belt.latent_mods[2])
+        -- the conditional acc never reaches the summed total
+        assert.are.equal(13, gear.acc)
     end)
 end)
 

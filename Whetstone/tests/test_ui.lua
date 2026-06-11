@@ -111,6 +111,7 @@ package.preload['imgui'] = function()
 end
 
 -- Flag/cond enums are globals in Ashita v4 (verified vs imguidef)
+ImGuiCond_Always = 1
 ImGuiCond_FirstUseEver = 4
 ImGuiWindowFlags_NoScrollbar = 8
 
@@ -246,6 +247,75 @@ describe('ui rendering', function()
 
         assert.are.equal('Whetstone 9.9.9-test###Whetstone', title)
         ui.version = nil
+    end)
+
+    it('lists out-of-model WS tagged, never with a damage number', function()
+        reset(true)
+        ui.draw(
+        {
+            target = { name = 'Test Crab' },
+            lines = {},
+            ws = {},
+            ws_excluded =
+            {
+                { name = 'red_lotus_blade', reason = 'magic' },
+                { name = 'tachi_jinpu', reason = 'hybrid' },
+            },
+        }, nil, { state = 'ok' })
+
+        local text = texts()
+
+        assert.is_true(text:find(
+            'red_lotus_blade %(magic %- out of model%)') ~= nil)
+        assert.is_true(text:find(
+            'tachi_jinpu %(hybrid %- out of model%)') ~= nil)
+    end)
+end)
+
+-- =====================================================================
+describe('panel position persistence', function()
+    it('samples the window position when the binding reports one', function()
+        stub.GetWindowPos = function()
+            calls[#calls + 1] = { name = 'GetWindowPos', args = {} }
+            return 120, 340
+        end
+
+        reset(true)
+        ui.draw(nil, nil, { state = 'no_target' })
+
+        assert.are.equal(120, ui.window_pos.x)
+        assert.are.equal(340, ui.window_pos.y)
+
+        rawset(stub, 'GetWindowPos', nil) -- restore auto-stub
+    end)
+
+    it('applies a restored position exactly once', function()
+        reset(true)
+        ui.restore_window_pos({ x = 200, y = 80 })
+        ui.draw(nil, nil, { state = 'no_target' })
+
+        assert.are.equal(1, count('SetNextWindowPos'))
+
+        for _, call in ipairs(calls) do
+            if call.name == 'SetNextWindowPos' then
+                assert.are.equal(200, call.args[1][1])
+                assert.are.equal(80, call.args[1][2])
+            end
+        end
+
+        -- consumed: the next frame must not re-pin the window
+        reset(true)
+        ui.draw(nil, nil, { state = 'no_target' })
+
+        assert.are.equal(0, count('SetNextWindowPos'))
+    end)
+
+    it('ignores the unset sentinel position', function()
+        reset(true)
+        ui.restore_window_pos({ x = -1, y = -1 })
+        ui.draw(nil, nil, { state = 'no_target' })
+
+        assert.are.equal(0, count('SetNextWindowPos'))
     end)
 end)
 

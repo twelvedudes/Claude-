@@ -48,6 +48,15 @@ FIXTURE_SQL = {
         # mods for an item with no equipment row -> ignored
         "INSERT INTO `item_mods` VALUES (60000,23,10);",
     ],
+    # itemId, modId, value, latentId, latentParam
+    'item_latents.sql': [
+        # conditional ACC (whitelisted mod) -> flags the item
+        "INSERT INTO `item_latents` VALUES (15457,25,50,50,31);",
+        # conditional REGEN (mod 370, not whitelisted) -> outside model
+        "INSERT INTO `item_latents` VALUES (15457,370,1,26,0);",
+        # latent for an item with no equipment row -> ignored
+        "INSERT INTO `item_latents` VALUES (60000,25,10,50,31);",
+    ],
 }
 
 
@@ -107,6 +116,21 @@ class ExtractItemsTests(unittest.TestCase):
         self.assertEqual(['main', 'sub'], X.decode_slots(3))
         self.assertEqual(['WAR', 'DRK'], X.decode_jobs(129))
 
+    def test_latent_mods_flagged_never_summed(self):
+        belt = self.items[15457]
+
+        # the conditional +50 acc flags the item...
+        self.assertEqual({'acc'}, belt['latent_mods'])
+        # ...but is NEVER added to the unconditional mods
+        self.assertEqual(3, belt['mods']['acc'])
+        # items without latent rows carry no flag
+        self.assertNotIn('latent_mods', self.items[17559])
+
+    def test_latent_conservation(self):
+        self.assertEqual(1, self.accounting['latents_flagged'])
+        self.assertEqual(1, self.accounting['latents_outside_model'])
+        self.assertEqual(1, self.accounting['latents_non_equipment'])
+
     def test_emission_loadable_shape(self):
         text = X.emit_lua(self.items, 'fixture')
 
@@ -114,6 +138,7 @@ class ExtractItemsTests(unittest.TestCase):
         self.assertIn('haste = 400', text)
         self.assertIn("weapon = { skill = 'axe', dmg = 48, delay = 276",
                       text)
+        self.assertIn("latent_mods = { 'acc' }", text)
 
 
 if __name__ == '__main__':

@@ -12,10 +12,19 @@
 
     Commands:
       /whet              toggle the panel
-      /whet level <n>    pin the current target's level (checker info)
-      /whet level        clear the pin
+      /whet level <n>    pin the current target's level (checker info);
+                         persisted per mob name
+      /whet level        clear the pin (session + persisted)
       /whet march <pct>  set March potency override (e.g. 14.06)
+      /whet march        clear the override
       /whet quest        toggle ranking of quest-locked WS (default off)
+      /whet profile <p>  switch formulas profile (phoenix | lsb);
+                         no argument prints the current one
+
+    All user state (pins, march override, quest toggle, profile, panel
+    visibility/position) persists per character via the Ashita
+    settings library (config/whetstone/<char>_<server>/settings.lua),
+    with a file fallback in the addon folder.
       /whet debug        toggle predicted-vs-observed swing logging to
                          <addon>/whetstone_swings.log (writes a full
                          session-state header on enable)
@@ -33,7 +42,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.5-beta'
+addon.version = '0.1.6-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -48,6 +57,7 @@ local advisor  = require('advisor')
 local ui       = require('ui')
 local swinglog = require('swinglog')
 local selftest = require('selftest')
+local config   = require('config')
 
 local state =
 {
@@ -75,6 +85,107 @@ local function load_data(name)
     end
 
     return result
+end
+
+-- =====================================================================
+-- Persisted user state (config.lua core, Ashita settings lib backend)
+-- =====================================================================
+
+local cfg = config.sanitize(nil) -- active config; defaults until loaded
+local settings_lib = nil         -- Ashita settings library when present
+local fallback_loaded = false    -- file backend loaded (lib absent)
+
+-- The settings library keeps saving the exact table reference that
+-- settings.load() returned, so sanitizing must happen IN PLACE.
+local function sanitize_in_place(tbl)
+    local clean = config.sanitize(tbl)
+
+    for key in pairs(tbl) do
+        tbl[key] = nil
+    end
+
+    for key, value in pairs(clean) do
+        tbl[key] = value
+    end
+
+    return tbl
+end
+
+-- Push the loaded config into runtime state (reload, character switch).
+local function apply_config()
+    state.assume_quest_ws = cfg.assume_quest_ws
+    state.march_override  = cfg.march_override > 0
+                            and cfg.march_override or nil
+    ui.visible[1] = cfg.visible
+    ui.restore_window_pos(cfg.window_pos)
+end
+
+local function character_tag()
+    local ok, name = pcall(function()
+        return AshitaCore:GetMemoryManager():GetParty():GetMemberName(0)
+    end)
+
+    if ok and type(name) == 'string' and #name > 0 then
+        return name
+    end
+
+    return nil
+end
+
+local function fallback_path(tag)
+    return addon_path .. 'whetstone_' .. tag .. '_settings.lua'
+end
+
+local function save_config()
+    if settings_lib then
+        settings_lib.save()
+        return
+    end
+
+    local tag = character_tag()
+
+    if not tag then
+        return -- no character yet; next change after login saves
+    end
+
+    local file = io.open(fallback_path(tag), 'w')
+
+    if file then
+        file:write(config.serialize(cfg))
+        file:close()
+    end
+end
+
+-- File-backend load is LAZY: the character name is not available at
+-- the 'load' event, so the first frame that can read it loads the
+-- per-character file. With the settings library this never runs.
+local function ensure_config_loaded()
+    if settings_lib or fallback_loaded then
+        return
+    end
+
+    local tag = character_tag()
+
+    if not tag then
+        return
+    end
+
+    fallback_loaded = true
+
+    local file = io.open(fallback_path(tag), 'r')
+
+    if file then
+        local text = file:read('*a')
+        file:close()
+
+        local loaded = config.deserialize(text)
+
+        if loaded then
+            cfg = config.sanitize(loaded)
+        end
+    end
+
+    apply_config()
 end
 
 -- forward declarations (defined after snapshot, used by the command
@@ -295,6 +406,28 @@ ashita.events.register('load', 'whetstone_load', function()
 
     ui.version = addon.version -- title bar: stale builds expose themselves
 
+    -- Per-character persisted state: Ashita settings library when
+    -- present (config/whetstone/<char>_<server>/settings.lua, handles
+    -- character switches), file fallback otherwise.
+    local ok_lib, lib = pcall(require, 'settings')
+
+    if ok_lib and type(lib) == 'table' and lib.load then
+        settings_lib = lib
+        cfg = sanitize_in_place(lib.load(config.sanitize(nil)))
+        apply_config()
+
+        lib.register('settings', 'whetstone_settings_update',
+            function(loaded)
+                if loaded ~= nil then
+                    cfg = sanitize_in_place(loaded)
+                    apply_config()
+                end
+            end)
+    else
+        print('[whetstone] settings library unavailable - using '
+            .. 'per-character file fallback in the addon folder')
+    end
+
     player.attach('whetstone')
 end)
 
@@ -316,12 +449,45 @@ ashita.events.register('command', 'whetstone_command', function(e)
 
     if args[2] == 'level' then
         state.pinned_level = tonumber(args[3]) -- nil clears
-    elseif args[2] == 'march' and tonumber(args[3]) then
-        state.march_override = tonumber(args[3]) / 100
+
+        -- A pin is knowledge about the MOB: persist it per mob name so
+        -- it survives reload and re-applies on retarget.
+        local target = get_current_target()
+
+        if target.valid then
+            cfg.pinned_levels[target.name] = state.pinned_level
+            save_config()
+        end
+    elseif args[2] == 'march' then
+        local pct = tonumber(args[3])
+
+        state.march_override = pct and pct / 100 or nil -- nil clears
+        cfg.march_override = state.march_override or 0
+        save_config()
+        print('[whetstone] March override: '
+            .. (pct and (pct .. '%') or 'cleared'))
     elseif args[2] == 'quest' then
         state.assume_quest_ws = not state.assume_quest_ws
+        cfg.assume_quest_ws = state.assume_quest_ws
+        save_config()
         print('[whetstone] quest WS ranking: '
             .. (state.assume_quest_ws and 'ON' or 'OFF'))
+    elseif args[2] == 'profile' then
+        local name = args[3]
+
+        if name and formulas.PROFILES[name] then
+            cfg.profile = name
+            save_config()
+            print('[whetstone] profile: ' .. name)
+        else
+            local names = {}
+            for key in pairs(formulas.PROFILES) do
+                names[#names + 1] = key
+            end
+            table.sort(names)
+            print(('[whetstone] profile is %s (available: %s)')
+                :format(cfg.profile, table.concat(names, ', ')))
+        end
     elseif args[2] == 'debug' then
         state.debug_log = not state.debug_log
         print('[whetstone] swing logging: '
@@ -498,6 +664,10 @@ snapshot = function()
         twohand_acc = 0,
     })
 
+    local trait_da, trait_ta = formulas.trait_multi_rates(
+        JOB_NAMES[stats.main_job], stats.main_level,
+        JOB_NAMES[stats.sub_job], stats.sub_level)
+
     return
     {
         player =
@@ -513,6 +683,11 @@ snapshot = function()
             -- Mod 165 / Mod 421), same precision class as gear haste
             crit_rate_bonus = (gear.crit_rate or 0) / 100,
             crit_dmg_bonus  = (gear.crit_dmg or 0) / 100,
+            -- multi-attack on WS swings (weaponskills.lua
+            -- getMultiAttacks): era traits (WAR DA / THF TA, main or
+            -- sub) + exact gear mods 288/302 from the item DB
+            double_attack = (trait_da + (gear.double_attack or 0)) / 100,
+            triple_attack = (trait_ta + (gear.triple_attack or 0)) / 100,
             weapon    =
             {
                 dmg       = main.dmg,
@@ -539,10 +714,13 @@ snapshot = function()
                 and gear.sub.weapon.dmg or nil,
         },
         haste           = haste,
+        -- session pin wins; otherwise the persisted per-mob pin
         target          = { zone = zone, name = name,
-                            level = state.pinned_level },
+                            level = state.pinned_level
+                                or cfg.pinned_levels[name] },
         data            = { mobs = mobs, ws = data.ws,
                             items = data.items },
+        profile         = cfg.profile,
         tp              = AshitaCore:GetMemoryManager():GetParty()
             :GetMemberTP(0),
         assume_quest_ws = state.assume_quest_ws,
@@ -663,7 +841,7 @@ write_session_header = function()
     append_log(swinglog.session_header(
     {
         version      = addon.version,
-        profile      = 'phoenix',
+        profile      = cfg.profile,
         stats        = player.state.char_stats or {},
         skills       = player.state.skills,
         weapon_skill = ok and snap and snap.player.weapon.skill or nil,
@@ -875,7 +1053,40 @@ ashita.events.register('packet_in', 'whetstone_swing_packet',
         end
     end)
 
+local pos_settle = nil -- frames until the moved panel position saves
+
 ashita.events.register('d3d_present', 'whetstone_present', function()
+    -- Config sync runs BEFORE the visibility early-return: closing the
+    -- panel via the title-bar X must still persist visible=false.
+    guarded('config_sync', function()
+        ensure_config_loaded()
+
+        if cfg.visible ~= ui.visible[1] then
+            cfg.visible = ui.visible[1]
+            save_config()
+        end
+
+        -- Position saves once the window stops moving for ~30 frames,
+        -- not on every dragged pixel.
+        local pos = ui.window_pos
+
+        if pos then
+            if pos.x ~= cfg.window_pos.x
+                or pos.y ~= cfg.window_pos.y then
+                cfg.window_pos.x = pos.x
+                cfg.window_pos.y = pos.y
+                pos_settle = 30
+            elseif pos_settle then
+                pos_settle = pos_settle - 1
+
+                if pos_settle <= 0 then
+                    pos_settle = nil
+                    save_config()
+                end
+            end
+        end
+    end)
+
     if not ui.visible[1] and not state.debug_log then
         return
     end

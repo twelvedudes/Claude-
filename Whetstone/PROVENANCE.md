@@ -59,6 +59,8 @@ Adjacent but out of the damage model (documented, not modeled):
 | `crit_rate` (kind='ws', 5% floor), `crit_rate_from_dex`, `crit_info` | `physical_utilities.lua` `calculateSwingCriticalRate`/`criticalRateFromStatDiff` | none |
 | `crit_rate` (kind='melee', 0 floor) | `battleutils.cpp` `GetCritHitRate`/`GetDexCritBonus` — dDEX tier curve verified IDENTICAL to the Lua WS path (0-6 +0, 7-13 +1, 14-19 +2, 20-29 +3, 30-39 +4, 40-50 dDEX−35, cap +15); only the clamp floor differs (C++ [0,100] vs Lua [5,100]) | none (swept; rov's crit hit is a WS `critVaries` param, handled by the WS extractor) |
 | `ws_damage` | `weaponskills.lua` `doPhysicalWeaponskill`/`calculateRawWSDmg`/`getSingleHitDamage` | WS *parameters* via `modules/wotg/lua/weaponskills/*` (extracted, not formula changes) |
+| `ws_damage` multi-attack expectation, `trait_multi_rates` | `weaponskills.lua` `getMultiAttacks`: exclusive elseif chain quad → triple (+2) → double (+1), at most 2 proc events (`numMultiProcs < 2`), 8 swings total — modeled as E[extras] = ta·2 + (1−ta)·da per swing roll with BOTH caps applied to the expectation. Trait values from `traits.sql` (mod 288 `DOUBLE_ATTACK`: WAR 10%@25; mod 302 `TRIPLE_ATTACK`: THF 5%@55 — rank 2+ rows carry ROV/ABYSSEA tags, absent at 75-cap; sub job grants at the sub's level). Gear DA/TA exact via `item_mods.sql` (whitelisted). Out of model: quad attack, mythic OA2-3 (no era gear) | none |
+| `advisor.ws_out_of_model` (magic/hybrid WS exclusion) | `weaponskills.lua`: pure magic WS dispatch `doMagicWeaponskill` (extractor kind = 'magic'); HYBRID WS (Tachi: Jinpu/Kagero...) dispatch `doPhysicalWeaponskill` — kind = 'physical' — but carry `ele`/`includemab`/`hybridWS` params (`getHybridDamage`: magic resist + elemental term on top of the physical hit). Any of those params excludes the WS from ranking; it is listed with an out-of-model tag instead of a wrong number | none |
 | `melee_swing` | composition of the above | — |
 
 | player.lua datum | Ground truth |
@@ -80,12 +82,33 @@ Adjacent but out of the damage model (documented, not modeled):
 | **OUT OF MODEL**: Kick Attacks / Footwork kicks (extra kick swings, `Mod::KICK_DMG`), H2H +3 rank adjustment is modeled but kick damage rounds are not | `calculateAttackDamage` KICK branch — revisit if MNK swing logs show unexplained extra swings |
 | WS availability gate (`advisor.ws_usable`) | `battleutils.cpp` `CanUseWeaponskill` (skill threshold + unlock branches + job blob incl. sub-job/mainOnly) and `charutils.cpp` `BuildingCharWeaponSkills` `ADDS_WEAPONSKILL` grant (Mod 355, whitelisted in the item DB) — relic-class WS have an all-zeros jobs blob + skilllevel 0 and exist ONLY through the weapon's item mod. Unlock-points state of wsnm/ksnm/nyzul weapons is client-unreadable: a held-but-locked unlockable weapon lists its WS optimistically |
 | Gear crit mods (advisor `crit_rate_bonus`/`crit_dmg_bonus`) | `item_mods.sql` Mod 165 `CRITHITRATE` + Mod 421 `CRIT_DMG_INCREASE` (whitelisted, exact via item DB) — out of model: Mod 964 `RANGED_CRIT_DMG_INCREASE`, Mod 563 `MAGIC_CRIT_DMG_INCREASE` (no ranged/magic crit damage in the advisor), Mod 908 `CRIT_DEF_BONUS` (mob-side; nets against crit_dmg in `melee_pdif` if ever supplied) |
+| Acc-buff warnings (`swinglog.WARN_EFFECTS` 199/320) | `scripts/enum/effect.lua` `MADRIGAL = 199`, `HUNTERS_ROLL = 320` — both add accuracy that 0x061 does not carry and the gear-only acc model cannot see; the session header warns that hit-rate verdicts are tainted while either is active (same class as the food-acc warning, effect 251) |
+
+## Out of model: conditional / latent mods
+
+`sql/item_latents.sql` (1,977 rows on the pinned commit) attaches mods
+that activate only under server-side conditions — HP/TP thresholds,
+day/weather, an ability being active (`latentId`/`latentParam` pairs,
+evaluated server-side in `src/map/latent_effect_container.cpp`).
+The client cannot read latent activation state, so the advisor models
+NONE of them:
+
+- `extract_items.py` ingests the table under full conservation
+  accounting; rows whose `modId` is whitelisted flag the item with
+  `latent_mods = { 'acc', ... }` (the conditional value is NEVER
+  summed into `mods`); rows on non-whitelisted mods are counted as
+  explicitly outside the model.
+- `player.gear_stats` surfaces the flag per equipped piece, and the
+  swinglog session header emits a WARNING line for every equipped
+  latent-bearing piece, naming the model-relevant mods involved —
+  predictions may be off exactly while the (unreadable) condition
+  holds, and the parse verdicts inherit that caveat.
 
 | Extractor | Ground truth | Module SQL handled |
 | --- | --- | --- |
 | `extract_mobs.py` | `src/map/utils/mobutils.cpp`, `grades.cpp`, `battleentity.cpp` DEF()/EVA() | **ingests** `phoenix/dynamis/sql/dyna_spawn.sql` (4,924 spawns, 45 groups, 15 pools); applies `traits`/`skill_ranks` UPDATEs row-wise (`rov`/`soa` job adjustments, `pre_2014_skill_ranks`); ignores spawntype-only `mob_groups` UPDATEs (columns not consumed) |
 | `extract_ws.py` | `scripts/actions/weaponskills/*`, `modules/wotg/lua/weaponskills/*`, `sql/weapon_skills.sql` | applies `wotg/tier_one_weapon_skills.sql` (tier-1 skilllevel 10) and `soa/weaponskills.sql` (ranged WS range) — 35 updates |
-| `extract_items.py` | `sql/item_equipment.sql`, `item_weapon.sql`, `item_mods.sql` | applies `abyssea/job_adjustments.sql` item_equipment level fixes (6); `pxi_item_basic.sql` touches only `item_basic` flags (table not consumed) |
+| `extract_items.py` | `sql/item_equipment.sql`, `item_weapon.sql`, `item_mods.sql`, `item_latents.sql` (latent flags only — see "Out of model: conditional / latent mods") | applies `abyssea/job_adjustments.sql` item_equipment level fixes (6); `pxi_item_basic.sql` touches only `item_basic` flags (table not consumed) |
 
 ## Conservation guarantees
 

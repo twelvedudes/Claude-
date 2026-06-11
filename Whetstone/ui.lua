@@ -27,6 +27,18 @@ local M = {}
 M.visible = { true }
 M.version = nil -- set by whetstone.lua at load; shown in the title bar
 
+-- Panel position persistence: window_pos is sampled every drawn frame
+-- (whetstone.lua saves it debounced); restore_window_pos queues a
+-- saved position to apply on the next frame.
+M.window_pos = nil
+local pending_pos = nil
+
+function M.restore_window_pos(pos)
+    if pos and pos.x and pos.x >= 0 then
+        pending_pos = { pos.x, pos.y }
+    end
+end
+
 -- Stamped into /whet panel output: if the field ever reports a state
 -- string without its [S#] tag, an old ui.lua is running somewhere.
 M.DRAW_VERSION = 'draw-v3-tagged'
@@ -156,6 +168,13 @@ local function draw_body(report, haste, status)
         text(color, prefix .. line.text)
     end
 
+    -- Usable WS the damage model cannot price (magic/hybrid): listed
+    -- with a tag, NEVER ranked - a wrong number is worse than none.
+    for _, excluded in ipairs(report.ws_excluded or {}) do
+        text(COLOR_INFO, string.format('  %s (%s - out of model)',
+            excluded.name, excluded.reason))
+    end
+
     -- Haste summary footer (gear exact, magic estimated)
     if haste then
         imgui.Separator()
@@ -177,6 +196,11 @@ function M.draw(report, haste, status)
 
     imgui.SetNextWindowSize({ 360, 0 }, ImGuiCond_FirstUseEver)
 
+    if pending_pos then
+        imgui.SetNextWindowPos(pending_pos, ImGuiCond_Always)
+        pending_pos = nil
+    end
+
     -- Version in the title bar so a stale build exposes itself on
     -- sight; '###Whetstone' keeps the window identity stable across
     -- version changes.
@@ -187,6 +211,14 @@ function M.draw(report, haste, status)
     if imgui.Begin(title, M.visible,
                    ImGuiWindowFlags_NoScrollbar) then
         draw_body(report, haste, status)
+    end
+
+    -- GetWindowPos is valid between Begin and End (IGuiManager
+    -- annotations: returns x, y as two numbers).
+    local x, y = imgui.GetWindowPos()
+
+    if type(x) == 'number' and type(y) == 'number' then
+        M.window_pos = { x = x, y = y }
     end
 
     imgui.End()

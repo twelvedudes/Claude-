@@ -277,7 +277,9 @@ local SUMMED_MODS =
 --   haste_raw    the 10000-based sum
 --   <mod>        sums for each whitelisted mod key
 --   main/sub     { id, name, weapon = {...} } for the weapon slots
---   pieces       { { slot, id, name, haste }, ... } (equipped only)
+--   pieces       { { slot, id, name, haste, latent_mods }, ... }
+--                (equipped only; latent_mods lists model-relevant
+--                CONDITIONAL mods the advisor does NOT count)
 function M.gear_stats(equipment, item_db)
     local totals = { haste = 0, haste_raw = 0, pieces = {} }
 
@@ -317,6 +319,11 @@ function M.gear_stats(equipment, item_db)
                 id    = item_id,
                 name  = item.name,
                 haste = (mods.haste or 0) / 10000,
+                -- conditional mods (item_latents.sql) on model-
+                -- relevant keys: NOT summed (the condition is server
+                -- state we cannot read), surfaced so the session
+                -- header can warn
+                latent_mods = item.latent_mods,
             }
         end
     end

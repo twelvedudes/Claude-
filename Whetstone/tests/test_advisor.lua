@@ -202,6 +202,26 @@ local WS_DB =
         unlock_id = 0, jobs = { 'WAR' }, sc = {},
         params = { numHits = 1, ftpMod = { 1.5, 1.5, 1.5 }, str_wsc = 0.5 },
     },
+    -- usable but OUT OF MODEL: hybrid (physical dispatch + elemental
+    -- params - the Tachi: Jinpu shape from the generated DB)
+    hybrid_strike =
+    {
+        id = 8, skill = 'great_axe', skill_level = 5, element = 16,
+        kind = 'physical', source = 'wotg_module', main_only = false,
+        unlock_id = 0, jobs = { 'WAR' }, sc = {},
+        params = { numHits = 2, ftpMod = { 0.5, 0.75, 1.0 },
+                   hybridWS = true, includemab = true, ele = 'wind',
+                   str_wsc = 0.3 },
+    },
+    -- usable but OUT OF MODEL: pure magic WS (doMagicWeaponskill)
+    arcane_strike =
+    {
+        id = 9, skill = 'great_axe', skill_level = 5, element = 1,
+        kind = 'magic', source = 'wotg_module', main_only = false,
+        unlock_id = 0, jobs = { 'WAR' }, sc = {},
+        params = { ftpMod = { 1.0, 2.375, 3.0 }, ele = 'fire',
+                   includemab = true, str_wsc = 0.3 },
+    },
     -- excluded: dynamic transcript value
     weird_ws =
     {
@@ -254,6 +274,43 @@ describe('WS param adapter', function()
     it('rejects non-physical and dynamic entries', function()
         assert.is_nil(A.adapt_ws_params(WS_DB.drainer))
         assert.is_nil(A.adapt_ws_params(WS_DB.weird_ws))
+    end)
+
+    it('rejects magic and hybrid entries', function()
+        assert.is_nil(A.adapt_ws_params(WS_DB.arcane_strike))
+        assert.is_nil(A.adapt_ws_params(WS_DB.hybrid_strike))
+    end)
+end)
+
+describe('out-of-model WS detection (magic/hybrid)', function()
+    it('flags doMagicWeaponskill entries as magic', function()
+        assert.are.equal('magic', A.ws_out_of_model(WS_DB.arcane_strike))
+    end)
+
+    it('flags physical-dispatch entries with elemental params as hybrid',
+    function()
+        -- the live trap: kind = "physical" but hybridWS/includemab/ele
+        assert.are.equal('hybrid', A.ws_out_of_model(WS_DB.hybrid_strike))
+
+        -- each marker alone is sufficient
+        local function physical_with(params)
+            return { kind = 'physical', params = params }
+        end
+
+        assert.are.equal('hybrid',
+            A.ws_out_of_model(physical_with({ hybridWS = true })))
+        assert.are.equal('hybrid',
+            A.ws_out_of_model(physical_with({ includemab = true })))
+        assert.are.equal('hybrid',
+            A.ws_out_of_model(physical_with({ ele = 'fire' })))
+    end)
+
+    it('passes pure physical WS and ignores ranged/special kinds', function()
+        assert.is_nil(A.ws_out_of_model(WS_DB.heavy_strike))
+        assert.is_nil(A.ws_out_of_model(WS_DB.true_strike))
+        assert.is_nil(A.ws_out_of_model(WS_DB.drainer))
+        assert.is_nil(A.ws_out_of_model(
+            { kind = 'ranged', params = { ele = 'fire' } }))
     end)
 end)
 
@@ -640,6 +697,38 @@ describe('evaluate', function()
         -- pDIF already) against DEF 300
         assert.are.equal('heavy_strike', report.ws[1].name)
         assert.is_true(report.ws[1].expected > report.ws[2].expected)
+    end)
+
+    it('never ranks magic/hybrid WS; surfaces them tagged instead', function()
+        local report = evaluate()
+
+        for _, ws in ipairs(report.ws) do
+            assert.is_true(ws.name ~= 'hybrid_strike'
+                and ws.name ~= 'arcane_strike',
+                ws.name .. ' must not be ranked')
+        end
+
+        -- both usable entries surface in ws_excluded, name-sorted
+        assert.are.equal(2, #report.ws_excluded)
+        assert.are.equal('arcane_strike', report.ws_excluded[1].name)
+        assert.are.equal('magic', report.ws_excluded[1].reason)
+        assert.are.equal('hybrid_strike', report.ws_excluded[2].name)
+        assert.are.equal('hybrid', report.ws_excluded[2].reason)
+    end)
+
+    it('applies multi-attack rates to the WS ranking', function()
+        local player = {}
+        for key, value in pairs(PLAYER) do
+            player[key] = value
+        end
+        player.double_attack = 0.10
+
+        local base = evaluate().ws[1]
+        local with_da = evaluate({ player = player }).ws[1]
+
+        assert.are.equal(base.name, with_da.name)
+        assert.is_true(with_da.expected > base.expected,
+            'DA must raise the WS expectation')
     end)
 
     it('excludes quest WS by default, includes them when toggled', function()

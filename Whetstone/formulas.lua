@@ -930,6 +930,43 @@ M.MARTIAL_ARTS =
     PUP = { { 25, 80 }, { 50, 100 }, { 75, 120 } },
 }
 
+-- Era multi-attack TRAITS in percent, from traits.sql (mod 288
+-- DOUBLE_ATTACK / mod 302 TRIPLE_ATTACK). Rank 2+ rows carry
+-- ROV/ABYSSEA content tags and are not loaded on 75-cap servers, so
+-- the era table is exactly: WAR Double Attack 10% at 25, THF Triple
+-- Attack 5% at 55. Sub job grants them at the SUB's level.
+M.TRAIT_DOUBLE_ATTACK = { WAR = { { 25, 10 } } }
+M.TRAIT_TRIPLE_ATTACK = { THF = { { 55, 5 } } }
+
+local function trait_value(tiers, level)
+    if not tiers then
+        return 0
+    end
+
+    local value = 0
+
+    for _, tier in ipairs(tiers) do
+        if level >= tier[1] then
+            value = tier[2]
+        end
+    end
+
+    return value
+end
+
+-- Combined trait DA/TA percents for a main/sub job combination.
+-- Returns da_percent, ta_percent (gear mods are added by the caller).
+function M.trait_multi_rates(main_job, main_level, sub_job, sub_level)
+    local da = math.max(
+        trait_value(M.TRAIT_DOUBLE_ATTACK[main_job], main_level or 0),
+        trait_value(M.TRAIT_DOUBLE_ATTACK[sub_job], sub_level or 0))
+    local ta = math.max(
+        trait_value(M.TRAIT_TRIPLE_ATTACK[main_job], main_level or 0),
+        trait_value(M.TRAIT_TRIPLE_ATTACK[sub_job], sub_level or 0))
+
+    return da, ta
+end
+
 function M.martial_arts(job, level)
     local tiers = M.MARTIAL_ARTS[job]
 
@@ -1068,6 +1105,19 @@ function M.ws_damage(p)
         acc_varies_bonus = M.ftp(p.tp, ws.acc_varies)
     end
 
+    -- Multi-attack procs on WS swings (weaponskills.lua
+    -- getMultiAttacks, rolled once per swing in calculateRawWSDmg):
+    -- exclusive elseif chain quad -> triple(+2) -> double(+1); at most
+    -- TWO proc events per WS (numMultiProcs < 2) and 8 swings total.
+    -- Expected extras per roll: ta*2 + (1-ta)*da. Linear expectation -
+    -- exact up to the 2-proc/8-swing caps, which at era rates (10%/5%)
+    -- bind with negligible probability; both caps are still applied
+    -- to the expectation. Quad attack and mythic OA2-3 are out of
+    -- model (era gear has none).
+    local da = p.double_attack or 0
+    local ta = p.triple_attack or 0
+    local extra_per_roll = ta * 2 + (1 - ta) * da
+
     -- Crit rate: only crit-varies weapon skills can crit naturally.
     local crit_rate = 0
 
@@ -1157,6 +1207,16 @@ function M.ws_damage(p)
         total_swings = 8
     end
 
+    -- Expected multi-attack extra swings: every base swing rolls once
+    -- (main hits and the offhand hit). Capped by the 2-proc limit
+    -- (worst case 2 triples = +4) and the 8-swing total.
+    local main_rolls = main_swings
+    local off_rolls = offhand_base and 1 or 0
+    local extra_budget = math.min(4, math.max(0, 8 - total_swings))
+    local extra_main = math.min(extra_per_roll * main_rolls, extra_budget)
+    local extra_off = math.min(extra_per_roll * off_rolls,
+                               extra_budget - extra_main)
+
     local expected = main_base * ftp_first * expected_pdif * first_hit_rate
 
     if main_swings > 1 then
@@ -1164,9 +1224,21 @@ function M.ws_damage(p)
             + main_base * ftp_rest * expected_pdif * extra_hit_rate * (main_swings - 1)
     end
 
+    -- multi-attack extras on mainhand rolls use the mainhand base
+    if extra_main > 0 then
+        expected = expected
+            + main_base * ftp_rest * expected_pdif * extra_hit_rate * extra_main
+    end
+
     if offhand_base then
         expected = expected
             + offhand_base * ftp_rest * expected_pdif * offhand_hit_rate
+
+        if extra_off > 0 then
+            expected = expected
+                + offhand_base * ftp_rest * expected_pdif
+                  * offhand_hit_rate * extra_off
+        end
     end
 
     expected = expected * (1 + (p.ws_dmg_bonus or 0))
@@ -1190,6 +1262,7 @@ function M.ws_damage(p)
         extra_hit_rate   = extra_hit_rate,
         offhand_hit_rate = offhand_hit_rate,
         swings           = total_swings,
+        expected_extra_swings = extra_main + extra_off,
     }
 end
 

@@ -858,6 +858,54 @@ describe('hand-to-hand / unarmed', function()
 end)
 
 -- =====================================================================
+describe('multi-attack traits', function()
+    -- traits.sql: WAR Double Attack 10% @25 (mod 288), THF Triple
+    -- Attack 5% @55 (mod 302); rank 2+ rows are ROV/ABYSSEA-tagged
+    -- and absent on 75-cap. Sub jobs grant at the sub's level.
+    it('grants WAR Double Attack 10% at level 25', function()
+        local da, ta = F.trait_multi_rates('WAR', 25)
+
+        assert.are.equal(10, da)
+        assert.are.equal(0, ta)
+    end)
+
+    it('grants nothing below the trait level', function()
+        local da = F.trait_multi_rates('WAR', 24)
+
+        assert.are.equal(0, da)
+    end)
+
+    it('grants THF Triple Attack 5% at level 55', function()
+        local da, ta = F.trait_multi_rates('THF', 55)
+
+        assert.are.equal(0, da)
+        assert.are.equal(5, ta)
+    end)
+
+    it('grants traits from the sub job at the SUB level', function()
+        -- NIN75/WAR37: sub level 37 >= 25 -> DA 10
+        local da = F.trait_multi_rates('NIN', 75, 'WAR', 37)
+
+        assert.are.equal(10, da)
+
+        -- WAR sub at 24: below trait level -> nothing
+        assert.are.equal(0, F.trait_multi_rates('NIN', 75, 'WAR', 24))
+
+        -- THF sub at 37: TA needs 55 -> nothing
+        local _, ta = F.trait_multi_rates('NIN', 75, 'THF', 37)
+
+        assert.are.equal(0, ta)
+    end)
+
+    it('grants nothing to jobs without the trait', function()
+        local da, ta = F.trait_multi_rates('MNK', 75, 'WHM', 37)
+
+        assert.are.equal(0, da)
+        assert.are.equal(0, ta)
+    end)
+end)
+
+-- =====================================================================
 describe('weapon skill damage', function()
     -- Shared scenario:
     --   D 50, fSTR 6, STR 100 with 50% mod -> WSC 50, alpha 0.83
@@ -1070,6 +1118,63 @@ describe('weapon skill damage', function()
         }))
 
         assert.are.equal(8, r.swings)
+    end)
+
+    it('rolls Double Attack on every WS swing', function()
+        -- weaponskills.lua getMultiAttacks: each of the 2 swings rolls
+        -- DA 10% -> E[extras] = 0.2, paid at the extra-hit rate with
+        -- fTP reset to 1:
+        --   E = 97*EPDIF*0.95 + 97*EPDIF*0.75*(1 + 0.2)
+        local r = F.ws_damage(scenario({ double_attack = 0.10 }))
+
+        assert.near(0.2, r.expected_extra_swings, 1e-12)
+        assert.near(97 * EPDIF * (0.95 + 0.75 * 1.2), r.expected, 1e-9)
+    end)
+
+    it('rolls Triple Attack before Double Attack (exclusive chain)', function()
+        -- getMultiAttacks elseif chain: TA first (+2), DA only on the
+        -- TA miss. Per roll: 0.05*2 + 0.95*0.10 = 0.195; 2 swings.
+        local r = F.ws_damage(scenario(
+        {
+            double_attack = 0.10,
+            triple_attack = 0.05,
+        }))
+
+        assert.near(0.39, r.expected_extra_swings, 1e-12)
+        assert.near(97 * EPDIF * (0.95 + 0.75 * (1 + 0.39)), r.expected, 1e-9)
+    end)
+
+    it('rolls the offhand swing too, at offhand base damage', function()
+        -- 1-hit axe + offhand, DA 10%: main roll pays at 97, the
+        -- offhand roll pays at 77.5 with the offhand hit rate.
+        --   E = EPDIF * (97*0.99 + 97*0.75*0.1 + 77.5*0.75*(1 + 0.1))
+        local r = F.ws_damage(scenario(
+        {
+            weapon        = 'axe',
+            offhand_dmg   = 30,
+            ws            = { ftp = { 1.0, 1.5, 2.0 }, num_hits = 1, mods = { str = 0.5 } },
+            double_attack = 0.10,
+        }))
+
+        assert.near(0.2, r.expected_extra_swings, 1e-12)
+        assert.near(
+            EPDIF * (97 * 0.99 + 97 * 0.75 * 0.1 + 77.5 * 0.75 * 1.1),
+            r.expected, 1e-9)
+    end)
+
+    it('grants no multi-attack extras past the 8-swing cap', function()
+        -- 8 base swings exhaust the budget entirely.
+        local r = F.ws_damage(scenario(
+        {
+            weapon        = 'axe',
+            offhand_dmg   = 30,
+            ws            = { ftp = { 1.0, 1.5, 2.0 }, num_hits = 8, mods = { str = 0.5 } },
+            double_attack = 0.10,
+            triple_attack = 0.05,
+        }))
+
+        assert.are.equal(8, r.swings)
+        assert.are.equal(0, r.expected_extra_swings)
     end)
 end)
 

@@ -310,8 +310,10 @@ describe('session header', function()
         {
             { slot = 'waist', name = 'swift_belt', haste = 0.04 },
             { slot = 'body', name = 'haubergeon', haste = 0 },
+            { slot = 'ring1', name = 'sniper\'s_ring_+1', haste = 0,
+              latent_mods = { 'acc', 'racc' } },
         },
-        buffs = { 33, 353, 251, 444 },
+        buffs = { 33, 353, 251, 444, 199, 320 },
         known_buffs =
         {
             [33] = { name = 'Haste', category = 'magic',
@@ -336,6 +338,25 @@ describe('session header', function()
     it('warns about food (acc model excludes food acc)', function()
         assert.is_true(text:find('WARNING effect 251') ~= nil)
         assert.is_true(text:find('food acc is NOT counted') ~= nil)
+    end)
+
+    it('warns about Madrigal and Hunter\'s Roll (invisible acc)', function()
+        -- effect.lua: MADRIGAL = 199, HUNTERS_ROLL = 320; both add
+        -- accuracy the model cannot see, so neither may land in the
+        -- silent "unaccounted" bucket
+        assert.is_true(text:find('WARNING effect 199') ~= nil)
+        assert.is_true(text:find('WARNING effect 320') ~= nil)
+        assert.is_nil(text:find('unaccounted effect ids[^\n]*199'))
+        assert.is_nil(text:find('unaccounted effect ids[^\n]*320'))
+    end)
+
+    it('warns about equipped latent gear (out-of-model mods)', function()
+        assert.is_true(
+            text:find('WARNING latent gear ring1=sniper\'s_ring_%+1')
+            ~= nil)
+        assert.is_true(text:find('%(acc,racc%)') ~= nil)
+        -- pieces without latent flags stay silent
+        assert.is_nil(text:find('latent gear waist'))
     end)
 
     it('lists unaccounted effect ids', function()

@@ -11,6 +11,13 @@ Sources:
     sql/item_equipment.sql  itemId, name, level, jobs mask, slot mask
     sql/item_weapon.sql     skill, dmg, delay, damage type
     sql/item_mods.sql       (itemId, modId, value) - whitelisted below
+    sql/item_latents.sql    (itemId, modId, value, latentId, latentParam)
+                            CONDITIONAL mods (HP%, TP%, day, weather,
+                            ability active...). The advisor models NONE
+                            of them; items whose latents touch a
+                            whitelisted mod are FLAGGED (latent_mods)
+                            so the session header can warn that the
+                            model may be wrong while they are equipped.
 
 Phoenix's era item SQL (modules/phoenix/sql/pxi_item_basic.sql) only
 adjusts flags (sale/mail), not stats, so the base tables are
@@ -98,7 +105,8 @@ def extract(server_root: Path, all_mods: bool = False) -> tuple:
     server_root = Path(server_root)
     sql = server_root / 'sql'
 
-    tables = ('item_equipment', 'item_weapon', 'item_mods')
+    tables = ('item_equipment', 'item_weapon', 'item_mods',
+              'item_latents')
     module_inserts, module_updates = collect_module_sql(server_root, tables)
 
     def rows(table):
@@ -132,6 +140,9 @@ def extract(server_root: Path, all_mods: bool = False) -> tuple:
         'mods_non_equipment': 0,
         'weapon_rows_matched': 0,
         'weapon_rows_non_equipment': 0,
+        'latents_flagged': 0,
+        'latents_outside_model': 0,
+        'latents_non_equipment': 0,
     }
 
     # Module UPDATEs (abyssea job_adjustments fixes pet food levels via
@@ -215,6 +226,23 @@ def extract(server_root: Path, all_mods: bool = False) -> tuple:
         else:
             accounting['mods_dropped_whitelist'] += 1
 
+    # Conditional (latent) mods: every row is accounted; rows touching
+    # a whitelisted mod flag the item, the rest are explicitly outside
+    # the damage model (HP regen, resists...).
+    for row in rows('item_latents'):
+        item_id, mod_id = row[:2]
+
+        if item_id not in items:
+            accounting['latents_non_equipment'] += 1
+            continue
+
+        if mod_id in MOD_KEYS:
+            items[item_id].setdefault('latent_mods', set()).add(
+                MOD_KEYS[mod_id])
+            accounting['latents_flagged'] += 1
+        else:
+            accounting['latents_outside_model'] += 1
+
     return items, accounting
 
 
@@ -250,6 +278,10 @@ def emit_lua(items: dict, source: str) -> str:
             mods = ', '.join('%s = %d' % (key, value) for key, value
                              in sorted(item['mods'].items()))
             parts.append('mods = { %s }' % mods)
+
+        if item.get('latent_mods'):
+            parts.append('latent_mods = { %s }' % ', '.join(
+                "'%s'" % key for key in sorted(item['latent_mods'])))
 
         lines.append('    [%d] = { %s },' % (item_id, ', '.join(parts)))
 

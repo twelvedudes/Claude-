@@ -30,7 +30,9 @@ questions a melee actually cares about:
 | `tests/test_advisor.lua` | Routing guard, disambiguation, ranking, WS gating tests | **done (Phase 4/5)** |
 | `ui.lua` | One-glance ImGui panel (renders advisor output) | **done; v4 binding verified vs official addons + stub-tested** |
 | `swinglog.lua` | `/whet debug` predicted-vs-observed logging (0x028 action parser) | **done (Phase 5, needs in-game shakedown)** |
-| `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `level`, `march`, `quest`, `debug`, `target`, `selftest`) | **shaking down in the field (v0.1.x)** |
+| `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `level`, `march`, `quest`, `profile`, `debug`, `target`, `selftest`) | **shaking down in the field (v0.1.x)** |
+| `config.lua` | Persisted user state: defaults, type-checked sanitize, sandboxed (de)serializer; Ashita settings lib backend wired in whetstone.lua | **done (v0.1.6)** |
+| `tests/test_config.lua` | Save/load round-trip, sanitize hardening, sandbox safety | **done (v0.1.6)** |
 | `PROVENANCE.md` | Function-by-function ground-truth manifest + full enabled-module audit | **done** |
 
 > **Release packaging:** the generated tables (`data/mobs.lua`,
@@ -230,6 +232,38 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
+
+## Cleanup phase (v0.1.6)
+
+- **Persistent user state** (`config.lua`): level pins (per mob name —
+  a pin is knowledge about the mob, so it re-applies on retarget),
+  March override, quest toggle, formulas profile, panel visibility and
+  position all survive `/addon reload` and relog, per character, via
+  the Ashita settings library (file fallback in the addon folder).
+  Loading is sanitized (type-checked merge over defaults) and
+  deserialization is sandboxed — a corrupt or malicious settings file
+  can neither poison runtime state nor execute code. `/whet profile
+  phoenix|lsb` switches the formulas profile live.
+- **WS multi-attack procs**: weapon skill swings roll Double/Triple
+  Attack exactly like `weaponskills.lua getMultiAttacks` (exclusive
+  TA-then-DA chain, max 2 proc events, 8-swing cap), as an expectation
+  `E[extras] = ta*2 + (1-ta)*da` per swing. Trait DA/TA (WAR 10%@25,
+  THF 5%@55, sub job at sub level — from `traits.sql`, era rows only)
+  combine with exact gear mods 288/302 from the item DB and feed both
+  the Best-WS ranking and the `/whet debug` WS predictions.
+- **Magic/hybrid WS are never ranked wrong**: pure magic WS
+  (`doMagicWeaponskill`) and HYBRID WS (physical dispatch with
+  `ele`/`includemab`/`hybridWS` params — Tachi: Jinpu/Kagero, Red
+  Lotus Blade class) are excluded from the damage ranking and listed
+  with a `(magic - out of model)` / `(hybrid - out of model)` tag
+  instead of a misleading number.
+- **Conditional/latent mods surfaced**: `item_latents.sql` (1,977
+  conditional rows) is ingested under conservation accounting; items
+  whose latents touch model-relevant mods are flagged in the item DB
+  and the `/whet debug` session header WARNS for each equipped
+  latent-bearing piece. Madrigal (199) and Hunter's Roll (320) joined
+  the food warning: accuracy the model cannot see taints hit-rate
+  verdicts, and the header now says so.
 
 ## Phase 6: pre-beta hardening
 

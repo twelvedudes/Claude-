@@ -223,6 +223,14 @@ M.WARN_EFFECTS =
 {
     [251] = 'Food: server-side att/def are included in 0x061, but the '
         .. 'ACCURACY model uses gear acc only - food acc is NOT counted',
+    -- scripts/enum/effect.lua: MADRIGAL = 199, HUNTERS_ROLL = 320.
+    -- Both add accuracy the 0x061 packet does NOT carry and the gear-
+    -- only acc model cannot see: hit-rate verdicts (HIT_CEILING) from
+    -- a session with either active are tainted.
+    [199] = 'Madrigal: song accuracy is invisible to the acc model - '
+        .. 'hit-rate verdicts from this session are tainted',
+    [320] = "Hunter's Roll: roll accuracy is invisible to the acc "
+        .. 'model - hit-rate verdicts from this session are tainted',
 }
 
 -- p:
@@ -278,6 +286,19 @@ function M.session_header(p)
         if piece.haste and piece.haste > 0 then
             add('gear_haste %s=%s %.2f%%', piece.slot, piece.name,
                 piece.haste * 100)
+        end
+    end
+
+    -- Conditional (latent) mods are OUT OF MODEL: the item DB flags
+    -- pieces whose item_latents rows touch a model-relevant mod, and
+    -- their presence taints predictions whenever the (unreadable)
+    -- condition holds.
+    for _, piece in ipairs(p.gear_pieces or {}) do
+        if piece.latent_mods and #piece.latent_mods > 0 then
+            add('WARNING latent gear %s=%s conditional mods (%s) are '
+                .. 'NOT in the model - predictions may be off while '
+                .. 'the latent condition holds', piece.slot, piece.name,
+                table.concat(piece.latent_mods, ','))
         end
     end
 

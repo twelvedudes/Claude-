@@ -37,11 +37,39 @@ local floor = math.floor
 -- WS parameter adapter (verbatim server params -> formulas inputs)
 -- =====================================================================
 
+-- Magic and hybrid WS are out of the damage model. Pure magic WS
+-- dispatch through doMagicWeaponskill (kind = 'magic'). HYBRID WS
+-- (Tachi: Jinpu/Kagero, Blade: Ei...) dispatch through
+-- doPhysicalWeaponskill - so kind = 'physical' - but carry elemental
+-- params the model cannot price: `ele`, `includemab` (MAB enters the
+-- damage), `hybridWS` (weaponskills.lua getHybridDamage: magic resist
+-- + dINT term on top of the physical hit). Ranking those as pure
+-- physical would always under/over-rank them, so they are surfaced
+-- with an out-of-model tag instead of a number.
+-- Returns 'magic' | 'hybrid' | nil.
+function M.ws_out_of_model(entry)
+    if entry.kind == 'magic' then
+        return 'magic'
+    end
+
+    if entry.kind ~= 'physical' then
+        return nil -- ranged/special: never listed for a melee weapon
+    end
+
+    local p = entry.params or {}
+
+    if p.hybridWS or p.includemab or p.ele then
+        return 'hybrid'
+    end
+
+    return nil
+end
+
 -- entry: one record from data/weaponskills.lua
 -- Returns a `ws` table for formulas.ws_damage, or nil for entries the
--- damage model cannot rank (specials, magic WS).
+-- damage model cannot rank (specials, magic/hybrid WS).
 function M.adapt_ws_params(entry)
-    if entry.kind ~= 'physical' then
+    if entry.kind ~= 'physical' or M.ws_out_of_model(entry) then
         return nil
     end
 
@@ -276,6 +304,7 @@ end
         weapon = { dmg, delay, skill = 'great_axe', h2h_skill = nil },
         offhand_dmg = nil,
         crit_rate_bonus = 0, ws_acc_bonus = 0, ws_skill = nil,
+        double_attack = 0, triple_attack = 0,  -- fractions (trait+gear)
       }
       haste  = output of player.haste_report() (optional)
       target = { zone =, name =, level = nil } -- vs data.mobs
@@ -291,6 +320,9 @@ end
                         estimated (bool) } - highest delta first
       ws     = ranked { name, expected, expected_best, entry } vs the
                WORST candidate point (range shown when ambiguous)
+      ws_excluded = name-sorted { name, reason ('magic'|'hybrid'),
+               entry } - usable but out of the damage model, never
+               ranked
 ]]
 function M.evaluate(p)
     local player = p.player
@@ -523,11 +555,21 @@ function M.evaluate(p)
 
     -- ----- 5. Weapon skill ranking at current TP -----------------------
     local ws_ranked = {}
+    local ws_excluded = {}
 
     if p.data and p.data.ws then
         for name, entry in pairs(p.data.ws) do
             local usable = entry.skill == weapon.skill
                 and M.ws_usable(entry, player, p.assume_quest_ws)
+
+            if usable and M.ws_out_of_model(entry) then
+                ws_excluded[#ws_excluded + 1] =
+                {
+                    name   = name,
+                    reason = M.ws_out_of_model(entry),
+                    entry  = entry,
+                }
+            end
 
             local ws = usable and M.adapt_ws_params(entry) or nil
 
@@ -559,6 +601,8 @@ function M.evaluate(p)
                             target_agi       = point.stats.agi,
                             crit_bonus       = player.crit_rate_bonus,
                             crit_dmg_bonus   = player.crit_dmg_bonus,
+                            double_attack    = player.double_attack,
+                            triple_attack    = player.triple_attack,
                             profile          = profile,
                         })
 
@@ -607,6 +651,10 @@ function M.evaluate(p)
             add('ws', text, delta,
                 target.ambiguous and not target.pinned_level)
         end
+
+        table.sort(ws_excluded, function(a, b)
+            return a.name < b.name
+        end)
     end
 
     -- ----- Rank: largest gain first, informational lines last ----------
@@ -622,9 +670,10 @@ function M.evaluate(p)
 
     return
     {
-        target = target,
-        lines  = lines,
-        ws     = ws_ranked,
+        target      = target,
+        lines       = lines,
+        ws          = ws_ranked,
+        ws_excluded = ws_excluded, -- usable but out of model (magic/hybrid)
     }
 end
 
