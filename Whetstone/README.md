@@ -25,9 +25,10 @@ questions a melee actually cares about:
 | `tools/test_extract_*.py` | Unit tests for each extractor | **done** |
 | `player.lua` | Char stats (`0x061`), combat skills (`0x062`), equipment via Ashita inventory, haste from buff IDs + item DB | **done (Phase 3/5)** |
 | `tests/test_player.lua` | Unit tests for the pure parts of player.lua | **done (Phase 3)** |
+| `tests/test_ui.lua` | ImGui binding contract tests (require, End pairing, hidden) | **done (v0.1.1)** |
 | `advisor.lua` | Ranked actionable deltas from formulas + generated data + player state | **done (Phase 4)** |
 | `tests/test_advisor.lua` | Routing guard, disambiguation, ranking, WS gating tests | **done (Phase 4/5)** |
-| `ui.lua` | One-glance ImGui panel (renders advisor output) | **done (Phase 4, needs in-game shakedown)** |
+| `ui.lua` | One-glance ImGui panel (renders advisor output) | **done; v4 binding verified vs official addons + stub-tested** |
 | `swinglog.lua` | `/whet debug` predicted-vs-observed logging (0x028 action parser) | **done (Phase 5, needs in-game shakedown)** |
 | `whetstone.lua` | Ashita v4 bootstrap (`/whet`, `level`, `march`, `quest`, `debug`) | **done (Phase 5, needs in-game shakedown)** |
 | `PROVENANCE.md` | Function-by-function ground-truth manifest + full enabled-module audit | **done** |
@@ -372,6 +373,7 @@ lua5.1 Whetstone/tests/test_player.lua
 lua5.1 Whetstone/tests/test_advisor.lua
 lua5.1 Whetstone/tests/test_swinglog.lua
 lua5.1 Whetstone/tests/test_selftest.lua
+lua5.1 Whetstone/tests/test_ui.lua
 python3 Whetstone/tools/test_extract_mobs.py
 python3 Whetstone/tools/test_extract_ws.py
 python3 Whetstone/tools/test_extract_items.py

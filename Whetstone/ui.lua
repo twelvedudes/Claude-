@@ -6,9 +6,21 @@
     lines - each one a change plus its expected gain. Estimated values
     are marked with '~'.
 
-    Pure rendering: all numbers come from advisor.evaluate(). Needs an
-    in-game shakedown pass like all Ashita glue.
+    Ashita v4 ImGui binding semantics (verified against the official
+    AshitaXI/Ashita-v4beta addons - equipmon, imguistyle, tparty):
+      - there is NO global `imgui`: require('imgui') is mandatory
+        (HorizonXI shakedown crash, v0.1.0-beta)
+      - by-ref arguments are Lua tables (M.visible = { true })
+      - imgui.End() runs UNCONDITIONALLY after Begin, whatever Begin
+        returned (canonical `if Begin(...) then ... end End()` shape)
+      - ImGuiWindowFlags_* / ImGuiCond_* are globals provided by Ashita
+      - sizes and colors are plain Lua tables
+
+    Pure rendering: all numbers come from advisor.evaluate(). The
+    binding is swappable (tests preload a recording stub).
 ]]
+
+local imgui = require('imgui')
 
 local M = {}
 
@@ -21,22 +33,10 @@ local COLOR_HEADER    = { 0.95, 0.95, 1.00, 1.0 }
 
 local MAX_LINES = 6
 
-function M.draw(report, haste)
-    if not M.visible[1] then
-        return
-    end
-
-    imgui.SetNextWindowSize({ 360, 0 }, ImGuiCond_FirstUseEver)
-
-    if not imgui.Begin('Whetstone', M.visible,
-                       ImGuiWindowFlags_NoScrollbar) then
-        imgui.End()
-        return
-    end
-
+-- Window body, only rendered when Begin() returned true.
+local function draw_body(report, haste)
     if not report then
         imgui.TextColored(COLOR_INFO, 'No target.')
-        imgui.End()
         return
     end
 
@@ -70,7 +70,6 @@ function M.draw(report, haste)
 
     if report.error then
         imgui.TextColored(COLOR_INFO, report.error)
-        imgui.End()
         return
     end
 
@@ -102,6 +101,20 @@ function M.draw(report, haste)
 
         imgui.TextColored(
             haste.magic_estimated and COLOR_ESTIMATED or COLOR_INFO, text)
+    end
+end
+
+function M.draw(report, haste)
+    if not M.visible[1] then
+        return
+    end
+
+    imgui.SetNextWindowSize({ 360, 0 }, ImGuiCond_FirstUseEver)
+
+    -- Canonical Ashita v4 shape: End() runs regardless of Begin().
+    if imgui.Begin('Whetstone', M.visible,
+                   ImGuiWindowFlags_NoScrollbar) then
+        draw_body(report, haste)
     end
 
     imgui.End()

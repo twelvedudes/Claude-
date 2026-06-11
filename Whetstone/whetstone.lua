@@ -28,7 +28,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.0-beta'
+addon.version = '0.1.1-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -76,6 +76,37 @@ local append_log
 local write_session_header
 local run_selftest
 
+-- One-time error latch: a broken subsystem (the UI especially) logs
+-- its full traceback ONCE and goes quiet, instead of either spamming
+-- 60 errors a second or - worse - taking the whole addon down and
+-- killing packet logging with it (HorizonXI shakedown, v0.1.0-beta).
+local error_latch = {}
+
+local function guarded(name, fn, ...)
+    local args = { ... }
+    local ok, err = xpcall(
+        function()
+            return fn(unpack(args))
+        end,
+        debug.traceback)
+
+    if not ok and not error_latch[name] then
+        error_latch[name] = true
+
+        local message = ('[whetstone] %s failed - disabled until '
+            .. 'reload, everything else keeps running'):format(name)
+
+        print(message)
+
+        if append_log then
+            append_log({ string.format('%s ERROR %s: %s',
+                os.date('%H:%M:%S'), name, tostring(err)) })
+        end
+    end
+
+    return ok
+end
+
 -- One zone's mob table at a time: the full world is ~4 MB of source
 -- that parses into far more than that as Lua structures inside FFXI's
 -- 32-bit address space. Loads on demand, unloads the previous zone,
@@ -112,6 +143,14 @@ local function mobs_for_zone(zone)
     local ok, zone_table = pcall(require, module_name)
 
     if not ok then
+        -- one-time, named: a corrupt zone file must be visible, not a
+        -- silently empty panel
+        if not error_latch[module_name] then
+            error_latch[module_name] = true
+            print(('[whetstone] failed to load %s: %s')
+                :format(module_name, tostring(zone_table)))
+        end
+
         return nil
     end
 
@@ -582,17 +621,23 @@ ashita.events.register('d3d_present', 'whetstone_present', function()
         return
     end
 
-    local ok, snap, haste = pcall(snapshot)
+    -- Data path: latched separately so a UI bug cannot starve
+    -- swinglog expectations (and vice versa).
+    guarded('advisor_update', function()
+        local snap, haste = snapshot()
 
-    if ok and snap then
-        local ok_eval, report = pcall(advisor.evaluate, snap)
+        if snap then
+            local report = advisor.evaluate(snap)
 
-        if ok_eval then
             state.last_report = report
             state.last_haste = haste
             update_expectations(snap, report)
         end
+    end)
+
+    if error_latch['ui.draw'] then
+        return -- UI is down; packet logging stays alive
     end
 
-    ui.draw(state.last_report, state.last_haste)
+    guarded('ui.draw', ui.draw, state.last_report, state.last_haste)
 end)
