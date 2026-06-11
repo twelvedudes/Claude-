@@ -24,6 +24,8 @@
                          write <addon>/whetstone_selftest.log
       /whet target       print raw target index / server id / name /
                          zone and whether the mob DB lookup hits
+      /whet panel        dump the exact state the next frame renders
+                         (booleans + table identities + draw version)
 
     This file is Ashita glue and needs an in-game shakedown; everything
     it calls is unit-tested pure Lua.
@@ -31,7 +33,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.2-beta'
+addon.version = '0.1.3-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -89,25 +91,44 @@ local error_latch = {}
 local append_error -- forward declaration
 
 local function guarded(name, fn, ...)
+    -- FIELD BUG (v0.1.2, HorizonXI): { ... } with nil holes has
+    -- undefined length, so unpack(args) DROPPED trailing arguments
+    -- whenever earlier ones were nil - ui.draw received zero args on
+    -- every report-less frame and rendered the catch-all forever
+    -- while every command path worked. select('#', ...) preserves
+    -- the exact argument count, nils included.
+    local count = select('#', ...)
     local args = { ... }
+
     local ok, err = xpcall(
         function()
-            return fn(unpack(args))
+            return fn(unpack(args, 1, count))
         end,
         debug.traceback)
 
-    if not ok and not error_latch[name] then
-        error_latch[name] = true
-        state.latched_error = state.latched_error or name
+    if not ok then
+        if not error_latch[name] then
+            error_latch[name] = true
+            state.latched_error = state.latched_error or name
 
-        -- Chat scrolls away; the full traceback goes to the error
-        -- file and the panel shows a persistent red ERROR line.
-        print(('[whetstone] %s failed - latched, see '
-            .. 'whetstone_error.log; everything else keeps running')
-            :format(name))
+            -- Chat scrolls away; the full traceback goes to the error
+            -- file and the panel shows a persistent red ERROR line.
+            print(('[whetstone] %s failed - latched, see '
+                .. 'whetstone_error.log (will auto-retry)')
+                :format(name))
 
-        if append_error then
-            append_error(name, err)
+            if append_error then
+                append_error(name, err)
+            end
+        end
+    elseif error_latch[name] then
+        -- Self-heal: a transient (startup race, zone churn) must not
+        -- disable a subsystem until reload. Log the recovery once.
+        error_latch[name] = nil
+        print(('[whetstone] %s recovered'):format(name))
+
+        if state.latched_error == name then
+            state.latched_error = next(error_latch)
         end
     end
 
@@ -267,6 +288,8 @@ ashita.events.register('load', 'whetstone_load', function()
     data.ws    = load_data('weaponskills')
     data.items = load_data('items')
 
+    ui.version = addon.version -- title bar: stale builds expose themselves
+
     player.attach('whetstone')
 end)
 
@@ -320,6 +343,41 @@ ashita.events.register('command', 'whetstone_command', function(e)
                     .. "zone's table (player/NPC, custom server mob, "
                     .. 'or name mismatch)')
             end
+        end
+    elseif args[2] == 'panel' then
+        -- Dump the EXACT state the next frame renders, plus module/
+        -- table identities (the duplicate-module-instance check: the
+        -- addresses printed here must match what the draw path uses).
+        local target = get_current_target()
+        local zone = current_zone()
+        local mobs = mobs_for_zone(zone)
+        local db_hit = target.valid and mobs and mobs[zone]
+            and mobs[zone][target.name] ~= nil
+
+        local snap, _, status = snapshot()
+
+        print(('[whetstone] panel: player_ready=%s target_valid=%s '
+            .. 'db_hit=%s advisor_ok=%s'):format(
+            tostring(player.state.char_stats ~= nil
+                and player.state.skills ~= nil),
+            tostring(target.valid), tostring(db_hit),
+            tostring(state.last_report ~= nil
+                and state.last_report.error == nil)))
+        print(('[whetstone] panel: live_status=%s/%s cached_status=%s '
+            .. 'latched=%s visible=%s'):format(
+            tostring(status and status.state),
+            tostring(status and status.detail),
+            tostring(state.last_status and state.last_status.state),
+            tostring(state.latched_error), tostring(ui.visible[1])))
+        print(('[whetstone] panel: ids state=%s ui=%s ui.draw=%s '
+            .. 'player.state=%s version=%s'):format(
+            tostring(state), tostring(ui), tostring(ui.draw),
+            tostring(player.state), tostring(ui.version)))
+        print('[whetstone] panel: ui.DRAW_VERSION=' ..
+            tostring(ui.DRAW_VERSION))
+
+        if snap then
+            print('[whetstone] panel: snapshot builds OK this instant')
         end
     elseif args[2] == 'selftest' then
         run_selftest()
@@ -771,6 +829,16 @@ ashita.events.register('d3d_present', 'whetstone_present', function()
     guarded('advisor_update', function()
         local snap, haste, status = snapshot()
 
+        -- Log each state TRANSITION once: permanent, spam-free proof
+        -- of when the frame-time assembler runs and what it decided.
+        if status and status.state ~= (state.last_status
+                and state.last_status.state) then
+            print(('[whetstone] panel state -> %s%s'):format(
+                status.state,
+                status.detail and (' (' .. tostring(status.detail) .. ')')
+                    or ''))
+        end
+
         state.last_status = status
 
         if snap then
@@ -785,10 +853,6 @@ ashita.events.register('d3d_present', 'whetstone_present', function()
             state.last_haste = nil
         end
     end)
-
-    if error_latch['ui.draw'] then
-        return -- UI is down; packet logging stays alive
-    end
 
     local status = state.last_status or {}
     status.latched_error = state.latched_error

@@ -25,6 +25,11 @@ local imgui = require('imgui')
 local M = {}
 
 M.visible = { true }
+M.version = nil -- set by whetstone.lua at load; shown in the title bar
+
+-- Stamped into /whet panel output: if the field ever reports a state
+-- string without its [S#] tag, an old ui.lua is running somewhere.
+M.DRAW_VERSION = 'draw-v3-tagged'
 
 local COLOR_GAIN      = { 0.55, 1.00, 0.55, 1.0 }
 local COLOR_INFO      = { 0.70, 0.70, 0.70, 1.0 }
@@ -34,13 +39,19 @@ local COLOR_ERROR     = { 1.00, 0.35, 0.35, 1.0 }
 
 local MAX_LINES = 6
 
--- Every snapshot failure mode renders DISTINCTLY - the v0.1.1 field
--- bug collapsed five different states into one eternal "No target."
+-- Every snapshot failure mode renders DISTINCTLY, and every branch
+-- carries a permanent [S#] tag so rendered text identifies its code
+-- path forever (the v0.1.2 field bug rendered an untagged catch-all
+-- that was indistinguishable from the v0.1.1 string).
+--   [S1] waiting for char packets   [S2] no target
+--   [S2z] no zone data              [S2w] weapon not in item DB
+--   [S3] target not in mob DB       [S4] advisor output
+--   [S?] catch-all (status missing entirely - transport bug)
 local STATE_TEXT =
 {
-    waiting_packets = 'Waiting for char data - change zones or jobs '
-        .. 'once to trigger 0x061/0x062.',
-    no_target       = 'No target.',
+    waiting_packets = '[S1] Waiting for char data - change zones or '
+        .. 'jobs once to trigger 0x061/0x062.',
+    no_target       = '[S2] No target.',
 }
 
 -- Window body, only rendered when Begin() returned true.
@@ -58,14 +69,21 @@ local function draw_body(report, haste, status)
     if not report then
         if status.state == 'no_zone_data' then
             imgui.TextColored(COLOR_INFO, string.format(
-                'No mob data for zone %s.', tostring(status.detail)))
+                '[S2z] No mob data for zone %s.',
+                tostring(status.detail)))
         elseif status.state == 'no_weapon' then
             imgui.TextColored(COLOR_INFO, string.format(
-                'Mainhand not in item DB (id %s).',
+                '[S2w] Mainhand not in item DB (id %s).',
                 tostring(status.detail)))
+        elseif STATE_TEXT[status.state] then
+            imgui.TextColored(COLOR_INFO, STATE_TEXT[status.state])
         else
-            imgui.TextColored(COLOR_INFO,
-                STATE_TEXT[status.state] or 'No target.')
+            -- Reaching here means draw received NO status at all:
+            -- that is a transport bug upstream, and it must say so
+            -- instead of impersonating the no-target state.
+            imgui.TextColored(COLOR_ERROR, string.format(
+                '[S?] no status reached the panel (state=%s) - '
+                .. 'report this line', tostring(status.state)))
         end
 
         return
@@ -89,7 +107,7 @@ local function draw_body(report, haste, status)
             end
         end
 
-        imgui.TextColored(COLOR_HEADER, label)
+        imgui.TextColored(COLOR_HEADER, '[S4] ' .. label)
 
         if target.ambiguous then
             imgui.SameLine()
@@ -102,10 +120,10 @@ local function draw_body(report, haste, status)
     if report.error then
         if report.error == 'unknown mob' then
             imgui.TextColored(COLOR_INFO, string.format(
-                'Target: %s (not in mob DB for this zone)',
+                '[S3] Target: %s (not in mob DB for this zone)',
                 tostring(report.target and report.target.name or '?')))
         else
-            imgui.TextColored(COLOR_INFO, report.error)
+            imgui.TextColored(COLOR_INFO, '[S3] ' .. report.error)
         end
 
         return
@@ -149,8 +167,14 @@ function M.draw(report, haste, status)
 
     imgui.SetNextWindowSize({ 360, 0 }, ImGuiCond_FirstUseEver)
 
+    -- Version in the title bar so a stale build exposes itself on
+    -- sight; '###Whetstone' keeps the window identity stable across
+    -- version changes.
+    local title = string.format('Whetstone %s###Whetstone',
+        M.version or 'dev')
+
     -- Canonical Ashita v4 shape: End() runs regardless of Begin().
-    if imgui.Begin('Whetstone', M.visible,
+    if imgui.Begin(title, M.visible,
                    ImGuiWindowFlags_NoScrollbar) then
         draw_body(report, haste, status)
     end

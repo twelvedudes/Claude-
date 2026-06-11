@@ -206,7 +206,7 @@ describe('ui rendering', function()
 
         local text = texts()
 
-        assert.is_true(text:find('Test Crab %(Lv%.20%-25, unconfirmed%)') ~= nil)
+        assert.is_true(text:find('%[S4%] Test Crab %(Lv%.20%-25, unconfirmed%)') ~= nil)
         assert.is_true(text:find('~ %+90 acc to cap') ~= nil)
         assert.is_true(text:find('  %+1 STR') ~= nil)
     end)
@@ -219,12 +219,32 @@ describe('ui rendering', function()
         assert.is_true(texts():find('Haste 31.0%% ~est %(gear 7.00%% exact%)') ~= nil)
     end)
 
-    it('handles a nil report without erroring', function()
+    it('flags a missing status as a transport bug, never no-target', function()
+        -- The v0.1.2 field bug: guarded() dropped the status argument
+        -- (nil-hole unpack), and the panel impersonated the no-target
+        -- state. Now zero-status draws render the [S?] sentinel.
         reset(true)
         ui.draw(nil, nil)
 
-        assert.is_true(texts():find('No target.') ~= nil)
+        assert.is_true(texts():find('%[S%?%] no status reached the panel')
+            ~= nil)
         assert.are.equal(1, count('End'))
+    end)
+
+    it('shows the version in the title with a stable window id', function()
+        reset(true)
+        ui.version = '9.9.9-test'
+        ui.draw(nil, nil, { state = 'no_target' })
+
+        local title
+        for _, call in ipairs(calls) do
+            if call.name == 'Begin' then
+                title = call.args[1]
+            end
+        end
+
+        assert.are.equal('Whetstone 9.9.9-test###Whetstone', title)
+        ui.version = nil
     end)
 end)
 
@@ -234,14 +254,14 @@ describe('ui status states (never one catch-all)', function()
         reset(true)
         ui.draw(nil, nil, { state = 'waiting_packets' })
 
-        assert.is_true(texts():find('Waiting for char data') ~= nil)
+        assert.is_true(texts():find('%[S1%] Waiting for char data') ~= nil)
     end)
 
     it('names the zone when mob data is missing', function()
         reset(true)
         ui.draw(nil, nil, { state = 'no_zone_data', detail = 142 })
 
-        assert.is_true(texts():find('No mob data for zone 142.') ~= nil)
+        assert.is_true(texts():find('%[S2z%] No mob data for zone 142.') ~= nil)
     end)
 
     it('names the item id when the mainhand misses the item DB', function()
@@ -249,7 +269,7 @@ describe('ui status states (never one catch-all)', function()
         ui.draw(nil, nil, { state = 'no_weapon', detail = 17440 })
 
         assert.is_true(
-            texts():find('Mainhand not in item DB %(id 17440%).') ~= nil)
+            texts():find('%[S2w%] Mainhand not in item DB %(id 17440%).') ~= nil)
     end)
 
     it('shows the target name when the mob is not in the DB', function()
@@ -262,7 +282,7 @@ describe('ui status states (never one catch-all)', function()
         }, nil, { state = 'ok' })
 
         assert.is_true(texts():find(
-            'Target: Custom Horizon Mob %(not in mob DB for this zone%)')
+            '%[S3%] Target: Custom Horizon Mob %(not in mob DB for this zone%)')
             ~= nil)
     end)
 
@@ -277,8 +297,35 @@ describe('ui status states (never one catch-all)', function()
             'ERROR %(latched%): advisor_update %- see '
             .. 'whetstone_error.log') ~= nil)
         -- the state line still renders after it
-        assert.is_true(text:find('No target.') ~= nil)
+        assert.is_true(text:find('%[S2%] No target.') ~= nil)
         assert.are.equal(1, count('End'))
+    end)
+end)
+
+-- =====================================================================
+describe('nil-hole argument transport (the v0.1.2 field bug)', function()
+    -- Replicates whetstone.lua's guarded() argument forwarding. The
+    -- broken form { ... } + unpack(args) loses trailing args after
+    -- nil holes on LuaJIT; the fixed form preserves them.
+    local function forward_fixed(fn, ...)
+        local count = select('#', ...)
+        local args = { ... }
+        return fn(unpack(args, 1, count))
+    end
+
+    it('delivers status through nil report/haste holes', function()
+        reset(true)
+        forward_fixed(ui.draw, nil, nil, { state = 'no_target' })
+
+        assert.is_true(texts():find('%[S2%] No target.') ~= nil)
+    end)
+
+    it('select count sees through the holes', function()
+        local seen
+        forward_fixed(function(...) seen = select('#', ...) end,
+            nil, nil, {})
+
+        assert.are.equal(3, seen)
     end)
 end)
 
