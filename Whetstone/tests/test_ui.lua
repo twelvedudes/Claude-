@@ -139,7 +139,8 @@ local function texts()
 
     for _, call in ipairs(calls) do
         if call.name == 'TextColored' then
-            out[#out + 1] = call.args[2]
+            -- printf discipline: args = { color, '%s', payload }
+            out[#out + 1] = call.args[3]
         end
     end
 
@@ -245,6 +246,83 @@ describe('ui rendering', function()
 
         assert.are.equal('Whetstone 9.9.9-test###Whetstone', title)
         ui.version = nil
+    end)
+end)
+
+-- =====================================================================
+describe('printf-format injection (the v0.1.4 field bug)', function()
+    it('renders % sequences verbatim, never as conversions', function()
+        -- live evidence: '% p' printed pointer hex, '% e' printed
+        -- 3.787520e-244. Every dynamic string must ride the '%s' slot.
+        reset(true)
+        ui.draw(
+        {
+            target = { name = 'Crab % p % e 100%' },
+            lines =
+            {
+                { kind = 'acc',
+                  text = '+90 acc to cap (75% -> 95%, +26.7% melee)',
+                  delta = 0.27, estimated = false },
+            },
+            ws = {},
+        }, { total = 0.31, gear = 0.07, magic_estimated = false },
+        { state = 'ok' })
+
+        local text = texts()
+
+        assert.is_true(text:find('Crab %% p %% e 100%%', 1, false) ~= nil
+            or text:find('Crab % p % e 100%', 1, true) ~= nil)
+        assert.is_true(text:find('(75% -> 95%, +26.7% melee)', 1, true)
+            ~= nil)
+    end)
+
+    it('every TextColored call uses the %s slot (runtime)', function()
+        reset(true)
+        ui.draw(REPORT, { total = 0.31, gear = 0.07 },
+                { state = 'ok', latched_error = 'x' })
+
+        for _, call in ipairs(calls) do
+            if call.name == 'TextColored' then
+                assert.are.equal('%s', call.args[2],
+                    'TextColored without %s slot')
+            end
+        end
+    end)
+
+    it('no imgui text call in ui.lua passes a non-literal format (source grep)', function()
+        local source_path
+
+        for _, candidate in ipairs({ here .. '../ui.lua',
+                                     'Whetstone/ui.lua', 'ui.lua' }) do
+            local handle = io.open(candidate, 'r')
+
+            if handle then
+                source_path = candidate
+                handle:close()
+                break
+            end
+        end
+
+        assert.is_true(source_path ~= nil, 'ui.lua not found')
+
+        local offenders = {}
+        local line_number = 0
+
+        for line in io.lines(source_path) do
+            line_number = line_number + 1
+
+            -- any direct imgui.Text/TextColored/TextUnformatted call
+            -- must carry the literal '%s' format slot on that line
+            if (line:find('imgui%.TextColored%s*%(')
+                or line:find('imgui%.Text%s*%('))
+                and not line:find("'%%s'") then
+                offenders[#offenders + 1] = line_number .. ': ' .. line
+            end
+        end
+
+        assert.are.equal(0, #offenders,
+            'printf-unsafe text calls:\n'
+            .. table.concat(offenders, '\n'))
     end)
 end)
 

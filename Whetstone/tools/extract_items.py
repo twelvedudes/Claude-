@@ -32,6 +32,7 @@ Emitted mod keys (src/map/modifier.h ids):
     triple_attack                      302
     delay_p                            380
     haste                              384   (10000-based: 375 = 3.75%)
+    adds_weaponskill                   355   (relic/mythic WS grant)
 
 Usage:
     python3 tools/extract_items.py --server /path/to/Phoenix \
@@ -71,6 +72,7 @@ MOD_KEYS = {
     302: 'triple_attack',
     380: 'delay_p',
     384: 'haste',
+    355: 'adds_weaponskill',
 }
 
 # item_equipment.slot bitmask positions (client equip slot ids)

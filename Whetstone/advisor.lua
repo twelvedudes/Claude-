@@ -83,6 +83,66 @@ function M.adapt_ws_params(entry)
     }
 end
 
+-- Server-faithful WS availability gate, replicating
+-- battleutils.cpp CanUseWeaponskill + the ADDS_WEAPONSKILL grant in
+-- charutils.cpp BuildingCharWeaponSkills:
+--
+--   1. The equipped weapon's ADDS_WEAPONSKILL item mod (Mod 355)
+--      grants its WS unconditionally - this is how relic/mythic WS
+--      (Final Heaven etc.) actually work. Their weapon_skills rows
+--      have an ALL-ZEROS jobs blob and skilllevel 0, so without the
+--      weapon they are usable by NOBODY.
+--   2. Jobs: getJob(main) > 0 OR (getJob(sub) > 0 AND not mainOnly).
+--      An empty jobs list means NO job qualifies (the v0.1.4 field
+--      bug: the old check skipped itself on empty lists, which is
+--      exactly backwards, and ranked Final Heaven for a barehanded
+--      MNK 9).
+--   3. skilllevel > 0: real parsed combat skill must reach it, and
+--      unlock_id > 0 needs the quest toggle (flags unreadable).
+--   4. skilllevel == 0 (non-relic case): unlock_id > 0 needs the
+--      toggle AND level >= 75 (the server's second branch).
+function M.ws_usable(entry, player, assume_quest_ws)
+    if player.weapon and player.weapon.adds_weaponskill == entry.id then
+        return true
+    end
+
+    local job_ok = false
+
+    for _, job in ipairs(entry.jobs or {}) do
+        if job == player.main_job then
+            job_ok = true
+            break
+        end
+
+        if job == player.sub_job and not entry.main_only then
+            job_ok = true
+            break
+        end
+    end
+
+    if not job_ok then
+        return false
+    end
+
+    if (entry.skill_level or 0) > 0 then
+        if player.ws_skill and player.ws_skill < entry.skill_level then
+            return false
+        end
+
+        if (entry.unlock_id or 0) > 0 and not assume_quest_ws then
+            return false
+        end
+    else
+        if (entry.unlock_id or 0) > 0 then
+            if not assume_quest_ws or (player.level or 0) < 75 then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
 -- Auto-attack base damage for a weapon table. H2H swings add the
 -- natural damage floor(skill * 0.11) + 3 to the weapon's D on BOTH
 -- fists (physical_utilities.lua calculateAttackDamage, H2H branch;
@@ -467,33 +527,7 @@ function M.evaluate(p)
     if p.data and p.data.ws then
         for name, entry in pairs(p.data.ws) do
             local usable = entry.skill == weapon.skill
-
-            if usable and player.main_job and #entry.jobs > 0 then
-                usable = false
-
-                for _, job in ipairs(entry.jobs) do
-                    if job == player.main_job then
-                        usable = true
-                        break
-                    end
-                end
-            end
-
-            -- Real (module-corrected) skill threshold: never rank a WS
-            -- the player's combat skill hasn't unlocked.
-            if usable and player.ws_skill then
-                usable = entry.skill_level <= player.ws_skill
-            end
-
-            -- Quest WS (unlock_id > 0, e.g. the 240-skill quests):
-            -- quest completion flags are not readable from the client,
-            -- so these are EXCLUDED unless the user toggles them on
-            -- (/whet quest). Recommending an unobtained Decimation is
-            -- worse than omitting an obtained one.
-            if usable and entry.unlock_id and entry.unlock_id > 0
-                and not p.assume_quest_ws then
-                usable = false
-            end
+                and M.ws_usable(entry, player, p.assume_quest_ws)
 
             local ws = usable and M.adapt_ws_params(entry) or nil
 

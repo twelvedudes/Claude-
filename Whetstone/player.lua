@@ -302,7 +302,9 @@ function M.gear_stats(equipment, item_db)
 
             if slot == 0 then
                 totals.main = { id = item_id, name = item.name,
-                                weapon = item.weapon }
+                                weapon = item.weapon,
+                                adds_weaponskill =
+                                    mods.adds_weaponskill }
             elseif slot == 1 then
                 totals.sub = { id = item_id, name = item.name,
                                weapon = item.weapon,

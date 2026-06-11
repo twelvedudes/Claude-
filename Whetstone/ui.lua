@@ -39,6 +39,16 @@ local COLOR_ERROR     = { 1.00, 0.35, 0.35, 1.0 }
 
 local MAX_LINES = 6
 
+-- FIELD BUG (v0.1.4): ImGui Text/TextColored are printf-style; the
+-- advisor's lines are full of literal '%' ('+90.0% melee'), which
+-- fired conversions live ('% p' -> pointer hex, '% e' -> 3.78e-244)
+-- and is a crash waiting on '% s'. EVERY dynamic string goes through
+-- the '%s' format slot; nothing user-influenced is ever a format
+-- string. (tests/test_ui.lua greps this file to enforce it.)
+local function text(color, value)
+    imgui.TextColored(color, '%s', value)
+end
+
 -- Every snapshot failure mode renders DISTINCTLY, and every branch
 -- carries a permanent [S#] tag so rendered text identifies its code
 -- path forever (the v0.1.2 field bug rendered an untagged catch-all
@@ -61,27 +71,27 @@ local function draw_body(report, haste, status)
     -- A latched subsystem error outranks everything: stale-looking
     -- silence is how the last bug hid.
     if status.latched_error then
-        imgui.TextColored(COLOR_ERROR, string.format(
+        text(COLOR_ERROR, string.format(
             'ERROR (latched): %s - see whetstone_error.log',
             status.latched_error))
     end
 
     if not report then
         if status.state == 'no_zone_data' then
-            imgui.TextColored(COLOR_INFO, string.format(
+            text(COLOR_INFO, string.format(
                 '[S2z] No mob data for zone %s.',
                 tostring(status.detail)))
         elseif status.state == 'no_weapon' then
-            imgui.TextColored(COLOR_INFO, string.format(
+            text(COLOR_INFO, string.format(
                 '[S2w] Mainhand not in item DB (id %s).',
                 tostring(status.detail)))
         elseif STATE_TEXT[status.state] then
-            imgui.TextColored(COLOR_INFO, STATE_TEXT[status.state])
+            text(COLOR_INFO, STATE_TEXT[status.state])
         else
             -- Reaching here means draw received NO status at all:
             -- that is a transport bug upstream, and it must say so
             -- instead of impersonating the no-target state.
-            imgui.TextColored(COLOR_ERROR, string.format(
+            text(COLOR_ERROR, string.format(
                 '[S?] no status reached the panel (state=%s) - '
                 .. 'report this line', tostring(status.state)))
         end
@@ -107,11 +117,11 @@ local function draw_body(report, haste, status)
             end
         end
 
-        imgui.TextColored(COLOR_HEADER, '[S4] ' .. label)
+        text(COLOR_HEADER, '[S4] ' .. label)
 
         if target.ambiguous then
             imgui.SameLine()
-            imgui.TextColored(COLOR_INFO, '[check to narrow]')
+            text(COLOR_INFO, '[check to narrow]')
         end
 
         imgui.Separator()
@@ -119,11 +129,11 @@ local function draw_body(report, haste, status)
 
     if report.error then
         if report.error == 'unknown mob' then
-            imgui.TextColored(COLOR_INFO, string.format(
+            text(COLOR_INFO, string.format(
                 '[S3] Target: %s (not in mob DB for this zone)',
                 tostring(report.target and report.target.name or '?')))
         else
-            imgui.TextColored(COLOR_INFO, '[S3] ' .. report.error)
+            text(COLOR_INFO, '[S3] ' .. report.error)
         end
 
         return
@@ -143,20 +153,20 @@ local function draw_body(report, haste, status)
 
         local prefix = line.estimated and '~ ' or '  '
 
-        imgui.TextColored(color, prefix .. line.text)
+        text(color, prefix .. line.text)
     end
 
     -- Haste summary footer (gear exact, magic estimated)
     if haste then
         imgui.Separator()
 
-        local text = string.format('Haste %.1f%%%s (gear %.2f%% exact)',
+        local footer = string.format('Haste %.1f%%%s (gear %.2f%% exact)',
             haste.total * 100,
             haste.magic_estimated and ' ~est' or '',
             haste.gear * 100)
 
-        imgui.TextColored(
-            haste.magic_estimated and COLOR_ESTIMATED or COLOR_INFO, text)
+        text(haste.magic_estimated and COLOR_ESTIMATED or COLOR_INFO,
+             footer)
     end
 end
 

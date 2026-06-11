@@ -329,6 +329,110 @@ describe('apples-to-apples guard', function()
 end)
 
 -- =====================================================================
+describe('WS availability gate (CanUseWeaponskill, the final_heaven hole)', function()
+    -- Era H2H ladder straight from Phoenix weapon_skills.sql:
+    --   combo            skilllevel 5    jobs incl. MNK
+    --   shoulder_tackle  skilllevel 40   jobs incl. MNK
+    --   raging_fists     skilllevel 125  jobs MNK/PUP
+    --   asuran_fists     skilllevel 250  unlock_id 1 (quest), main_only
+    --   final_heaven     skilllevel 0    jobs EMPTY, main_only (relic:
+    --                    granted only by Spharai's ADDS_WEAPONSKILL)
+    local H2H_LADDER =
+    {
+        combo = { id = 1, skill = 'hand_to_hand', skill_level = 5,
+                  unlock_id = 0, main_only = false,
+                  jobs = { 'WAR', 'MNK', 'THF', 'NIN', 'PUP', 'DNC' } },
+        shoulder_tackle = { id = 2, skill = 'hand_to_hand',
+                  skill_level = 40, unlock_id = 0, main_only = false,
+                  jobs = { 'WAR', 'MNK', 'THF', 'NIN', 'PUP', 'DNC' } },
+        raging_fists = { id = 5, skill = 'hand_to_hand',
+                  skill_level = 125, unlock_id = 0, main_only = false,
+                  jobs = { 'MNK', 'PUP' } },
+        asuran_fists = { id = 9, skill = 'hand_to_hand',
+                  skill_level = 250, unlock_id = 1, main_only = true,
+                  jobs = { 'MNK', 'PUP' } },
+        final_heaven = { id = 10, skill = 'hand_to_hand',
+                  skill_level = 0, unlock_id = 0, main_only = true,
+                  jobs = {} },
+    }
+
+    local function available(player, assume_quest)
+        local names = {}
+
+        for name, entry in pairs(H2H_LADDER) do
+            if A.ws_usable(entry, player, assume_quest) then
+                names[#names + 1] = name
+            end
+        end
+
+        table.sort(names)
+        return table.concat(names, ',')
+    end
+
+    it('a barehanded MNK 9 gets exactly Combo', function()
+        -- MNK 9 era H2H skill cap = 27: only combo (5) is reachable;
+        -- final_heaven must NOT appear (the live bug)
+        local mnk9 = { level = 9, main_job = 'MNK', ws_skill = 27,
+                       weapon = { skill = 'hand_to_hand' } }
+
+        assert.are.equal('combo', available(mnk9, false))
+    end)
+
+    it('skill 40 adds Shoulder Tackle; 125 adds Raging Fists', function()
+        local mnk13 = { level = 13, main_job = 'MNK', ws_skill = 40,
+                        weapon = {} }
+
+        assert.are.equal('combo,shoulder_tackle', available(mnk13, false))
+
+        local mnk41 = { level = 41, main_job = 'MNK', ws_skill = 125,
+                        weapon = {} }
+
+        assert.are.equal('combo,raging_fists,shoulder_tackle',
+            available(mnk41, false))
+    end)
+
+    it('quest WS needs the toggle; relic stays locked regardless', function()
+        local mnk75 = { level = 75, main_job = 'MNK', ws_skill = 269,
+                        weapon = {} }
+
+        assert.are.equal('combo,raging_fists,shoulder_tackle',
+            available(mnk75, false))
+        assert.are.equal('asuran_fists,combo,raging_fists,shoulder_tackle',
+            available(mnk75, true))
+    end)
+
+    it('the relic weapon itself grants its WS via ADDS_WEAPONSKILL', function()
+        local with_spharai = { level = 75, main_job = 'MNK',
+                               ws_skill = 269,
+                               weapon = { skill = 'hand_to_hand',
+                                          adds_weaponskill = 10 } }
+
+        assert.is_true(A.ws_usable(H2H_LADDER.final_heaven,
+                                   with_spharai, false))
+    end)
+
+    it('sub job qualifies unless the WS is main-only', function()
+        local war_mnk = { level = 41, main_job = 'WAR', sub_job = 'MNK',
+                          ws_skill = 125, weapon = {} }
+
+        -- raging_fists (MNK/PUP, not main-only) via the MNK sub
+        assert.is_true(A.ws_usable(H2H_LADDER.raging_fists,
+                                   war_mnk, false))
+        -- asuran_fists is main-only: the sub never qualifies
+        assert.is_false(A.ws_usable(H2H_LADDER.asuran_fists,
+                                    war_mnk, true))
+    end)
+
+    it('an empty jobs list means NOBODY, not everybody', function()
+        local anyone = { level = 75, main_job = 'MNK', ws_skill = 999,
+                         weapon = {} }
+
+        assert.is_false(A.ws_usable(H2H_LADDER.final_heaven,
+                                    anyone, true))
+    end)
+end)
+
+-- =====================================================================
 describe('barehanded MNK (unarmed H2H pseudo-weapon)', function()
     -- Field bug (HorizonXI v0.1.3): an empty MNK main slot dead-ended
     -- in S2w. The unarmed pseudo-weapon (itemutils.cpp: D 0, skill

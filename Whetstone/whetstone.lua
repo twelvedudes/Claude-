@@ -33,7 +33,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.4-beta'
+addon.version = '0.1.5-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -504,6 +504,7 @@ snapshot = function()
         {
             level     = stats.main_level,
             main_job  = JOB_NAMES[stats.main_job],
+            sub_job   = JOB_NAMES[stats.sub_job],
             stats     = stats.stats,
             attack    = stats.attack,
             accuracy  = accuracy,
@@ -529,6 +530,10 @@ snapshot = function()
                         stats.main_level) or nil,
                 swings_per_round = main.skill == 'hand_to_hand'
                     and formulas.H2H_SWINGS_PER_ROUND or 1,
+                -- relic/mythic WS grant from the equipped weapon's
+                -- item mod (ADDS_WEAPONSKILL = 355)
+                adds_weaponskill = gear.main
+                    and gear.main.adds_weaponskill or nil,
             },
             offhand_dmg = gear.sub and gear.sub.weapon
                 and gear.sub.weapon.dmg or nil,
