@@ -42,7 +42,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.6-beta'
+addon.version = '0.1.7-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -136,23 +136,35 @@ local function fallback_path(tag)
     return addon_path .. 'whetstone_' .. tag .. '_settings.lua'
 end
 
+local save_warned = false -- one-time: a broken save path warns once
+
 local function save_config()
-    if settings_lib then
-        settings_lib.save()
-        return
-    end
+    -- A failing SAVE must never break the command that triggered it;
+    -- the state change still applies in memory for this session.
+    local ok, err = pcall(function()
+        if settings_lib then
+            settings_lib.save()
+            return
+        end
 
-    local tag = character_tag()
+        local tag = character_tag()
 
-    if not tag then
-        return -- no character yet; next change after login saves
-    end
+        if not tag then
+            return -- no character yet; next change after login saves
+        end
 
-    local file = io.open(fallback_path(tag), 'w')
+        local file = io.open(fallback_path(tag), 'w')
 
-    if file then
-        file:write(config.serialize(cfg))
-        file:close()
+        if file then
+            file:write(config.serialize(cfg))
+            file:close()
+        end
+    end)
+
+    if not ok and not save_warned then
+        save_warned = true
+        print(('[whetstone] settings save failed (%s) - state kept '
+            .. 'in memory for this session'):format(tostring(err)))
     end
 end
 
@@ -409,23 +421,50 @@ ashita.events.register('load', 'whetstone_load', function()
     -- Per-character persisted state: Ashita settings library when
     -- present (config/whetstone/<char>_<server>/settings.lua, handles
     -- character switches), file fallback otherwise.
-    local ok_lib, lib = pcall(require, 'settings')
+    --
+    -- FIELD BUG (v0.1.6, first load): the lib's no-file branch ends in
+    -- `return defaults:copy(true)` (libs/settings.lua:179) - a T{}
+    -- table method. Plain-table defaults crashed there and the THROW
+    -- ESCAPED THE LOAD EVENT, unloading the whole addon. Two fixes:
+    -- defaults go through T() per the lib's conventions, and the
+    -- entire init is pcall'd - persistence failure degrades to
+    -- in-memory defaults (+ the file fallback) with one warning line,
+    -- it NEVER takes the addon down.
+    local ok_init, init_err = pcall(function()
+        local lib = require('settings')
 
-    if ok_lib and type(lib) == 'table' and lib.load then
-        settings_lib = lib
-        cfg = sanitize_in_place(lib.load(config.sanitize(nil)))
+        assert(type(lib) == 'table' and lib.load, 'settings lib shape')
+
+        -- T{} defaults: the lib calls :copy() on them (first load).
+        local defaults = config.sanitize(nil)
+
+        if type(T) == 'function' then
+            defaults = T(defaults)
+        end
+
+        cfg = sanitize_in_place(lib.load(defaults))
         apply_config()
 
         lib.register('settings', 'whetstone_settings_update',
             function(loaded)
-                if loaded ~= nil then
-                    cfg = sanitize_in_place(loaded)
-                    apply_config()
-                end
+                -- Runs inside the lib's event dispatch on character
+                -- switch: must never throw back into it.
+                pcall(function()
+                    if loaded ~= nil then
+                        cfg = sanitize_in_place(loaded)
+                        apply_config()
+                    end
+                end)
             end)
-    else
-        print('[whetstone] settings library unavailable - using '
-            .. 'per-character file fallback in the addon folder')
+
+        settings_lib = lib -- last: only a fully-wired lib is trusted
+    end)
+
+    if not ok_init then
+        settings_lib = nil
+        print(('[whetstone] settings library init failed (%s) - '
+            .. 'falling back to per-character file in the addon '
+            .. 'folder'):format(tostring(init_err)))
     end
 
     player.attach('whetstone')
@@ -547,6 +586,11 @@ ashita.events.register('command', 'whetstone_command', function(e)
             tostring(status and status.detail),
             tostring(state.last_status and state.last_status.state),
             tostring(state.latched_error), tostring(ui.visible[1])))
+        -- 'all green + empty screen' must be impossible: this is the
+        -- count of text lines the LAST draw actually emitted. 0 with
+        -- visible=true and an ok status names a dead render path.
+        print(('[whetstone] panel: lines_rendered_last_frame=%s')
+            :format(tostring(ui.lines_rendered)))
         print(('[whetstone] panel: ids state=%s ui=%s ui.draw=%s '
             .. 'player.state=%s version=%s'):format(
             tostring(state), tostring(ui), tostring(ui.draw),
@@ -1016,6 +1060,19 @@ run_selftest = function()
             local count = 0
             for _ in pairs(mobs[zone] or {}) do count = count + 1 end
             return ('zone %d: %d mob names'):format(zone, count)
+        end },
+
+        { name = 'settings_backend', fn = function()
+            -- v0.1.6 field bug: the settings lib threw on first load
+            -- and unloaded the addon. The init is now pcall'd; this
+            -- names which persistence backend actually survived.
+            if settings_lib then
+                return 'ashita settings lib (per-character)'
+            end
+
+            return 'file fallback ('
+                .. (fallback_loaded and 'loaded' or 'pending character')
+                .. ')'
         end },
     }
 

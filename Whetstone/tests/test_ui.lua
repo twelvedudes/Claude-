@@ -139,9 +139,9 @@ local function texts()
     local out = {}
 
     for _, call in ipairs(calls) do
-        if call.name == 'TextColored' then
-            -- printf discipline: args = { color, '%s', payload }
-            out[#out + 1] = call.args[3]
+        if call.name == 'TextUnformatted' then
+            -- unformatted discipline: args = { payload } - nothing else
+            out[#out + 1] = call.args[1]
         end
     end
 
@@ -189,7 +189,7 @@ describe('ui binding contract', function()
         assert.are.equal(1, count('Begin'))
         assert.are.equal(1, count('End'))
         -- and no body rendering happened
-        assert.are.equal(0, count('TextColored'))
+        assert.are.equal(0, count('TextUnformatted'))
     end)
 
     it('renders nothing at all when hidden', function()
@@ -320,14 +320,22 @@ describe('panel position persistence', function()
 end)
 
 -- =====================================================================
-describe('printf-format injection (the v0.1.4 field bug)', function()
-    it('renders % sequences verbatim, never as conversions', function()
-        -- live evidence: '% p' printed pointer hex, '% e' printed
-        -- 3.787520e-244. Every dynamic string must ride the '%s' slot.
+describe('format-string safety (the v0.1.4 + v0.1.6 field bugs)', function()
+    -- The binding's Text/TextColored take ONE text argument and treat
+    -- it as a printf format (v0.1.4: '% p' rendered pointer hex). The
+    -- v0.1.5 fix TextColored(color, '%s', value) rendered the literal
+    -- '%s' and DROPPED the payload (v0.1.6: all-green empty panel).
+    -- The contract is now: TextUnformatted ONLY, payload as the sole
+    -- argument, color via PushStyleColor.
+
+    it('renders % sequences verbatim through TextUnformatted', function()
+        -- the v0.1.6 report's round-trip payload, plus live evidence
+        local payload = '% p % e % c % o % s'
+
         reset(true)
         ui.draw(
         {
-            target = { name = 'Crab % p % e 100%' },
+            target = { name = 'Crab ' .. payload .. ' 100%' },
             lines =
             {
                 { kind = 'acc',
@@ -340,26 +348,53 @@ describe('printf-format injection (the v0.1.4 field bug)', function()
 
         local text = texts()
 
-        assert.is_true(text:find('Crab %% p %% e 100%%', 1, false) ~= nil
-            or text:find('Crab % p % e 100%', 1, true) ~= nil)
+        assert.is_true(text:find('Crab ' .. payload .. ' 100%', 1, true)
+            ~= nil, 'payload must round-trip byte-identical')
         assert.is_true(text:find('(75% -> 95%, +26.7% melee)', 1, true)
             ~= nil)
     end)
 
-    it('every TextColored call uses the %s slot (runtime)', function()
+    it('passes exactly ONE argument to every TextUnformatted call', function()
+        -- extra arguments are what hid the v0.1.6 payload drop: the
+        -- binding takes one string, anything after it vanishes
         reset(true)
         ui.draw(REPORT, { total = 0.31, gear = 0.07 },
                 { state = 'ok', latched_error = 'x' })
 
+        local seen = 0
+
         for _, call in ipairs(calls) do
-            if call.name == 'TextColored' then
-                assert.are.equal('%s', call.args[2],
-                    'TextColored without %s slot')
+            if call.name == 'TextUnformatted' then
+                seen = seen + 1
+                assert.are.equal(1, #call.args,
+                    'TextUnformatted must get the payload and NOTHING else')
+                assert.are.equal('string', type(call.args[1]))
             end
         end
+
+        assert.is_true(seen > 0)
     end)
 
-    it('no imgui text call in ui.lua passes a non-literal format (source grep)', function()
+    it('wraps every text line in PushStyleColor/PopStyleColor', function()
+        reset(true)
+        ui.draw(REPORT, { total = 0.31, gear = 0.07 }, { state = 'ok' })
+
+        assert.are.equal(count('TextUnformatted'), count('PushStyleColor'))
+        assert.are.equal(count('TextUnformatted'), count('PopStyleColor'))
+    end)
+
+    it('never calls format-interpreting text functions (runtime)', function()
+        reset(true)
+        ui.draw(REPORT, { total = 0.31, gear = 0.07 },
+                { state = 'ok', latched_error = 'x' })
+
+        assert.are.equal(0, count('Text'))
+        assert.are.equal(0, count('TextColored'))
+        assert.are.equal(0, count('TextDisabled'))
+        assert.are.equal(0, count('TextWrapped'))
+    end)
+
+    it('TextUnformatted is the only imgui text call in ui.lua (source grep)', function()
         local source_path
 
         for _, candidate in ipairs({ here .. '../ui.lua',
@@ -381,18 +416,51 @@ describe('printf-format injection (the v0.1.4 field bug)', function()
         for line in io.lines(source_path) do
             line_number = line_number + 1
 
-            -- any direct imgui.Text/TextColored/TextUnformatted call
-            -- must carry the literal '%s' format slot on that line
-            if (line:find('imgui%.TextColored%s*%(')
-                or line:find('imgui%.Text%s*%('))
-                and not line:find("'%%s'") then
-                offenders[#offenders + 1] = line_number .. ': ' .. line
+            -- comments may NAME the forbidden calls (war stories);
+            -- only code is held to the contract
+            local code = line:gsub('%-%-.*', '')
+
+            -- any imgui.Text* call that is NOT TextUnformatted goes
+            -- through the binding's printf path and is forbidden
+            for name in code:gmatch('imgui%.(Text%a*)%s*%(') do
+                if name ~= 'TextUnformatted' then
+                    offenders[#offenders + 1] =
+                        line_number .. ': ' .. line
+                end
             end
         end
 
         assert.are.equal(0, #offenders,
-            'printf-unsafe text calls:\n'
+            'format-interpreting text calls:\n'
             .. table.concat(offenders, '\n'))
+    end)
+end)
+
+-- =====================================================================
+describe('lines_rendered diagnostic (the v0.1.6 all-green-empty gap)', function()
+    it('counts the text lines a draw actually emitted', function()
+        reset(true)
+        ui.draw(REPORT, nil, { state = 'ok' })
+
+        assert.is_true(ui.lines_rendered > 0)
+        assert.are.equal(count('TextUnformatted'), ui.lines_rendered)
+    end)
+
+    it('reports zero when hidden', function()
+        reset(true)
+        ui.draw(REPORT, nil, { state = 'ok' }) -- non-zero first
+
+        ui.visible[1] = false
+        ui.draw(REPORT, nil, { state = 'ok' })
+
+        assert.are.equal(0, ui.lines_rendered)
+    end)
+
+    it('reports zero when the window is collapsed', function()
+        reset(false) -- Begin returns false
+        ui.draw(REPORT, nil, { state = 'ok' })
+
+        assert.are.equal(0, ui.lines_rendered)
     end)
 end)
 

@@ -233,6 +233,30 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
 
+## Field fixes (v0.1.7)
+
+- **Empty panel with an all-green dump**: the Ashita binding's
+  `Text`/`TextColored` take exactly ONE text argument (SDK
+  annotations; `TextV`/`TextColoredV` are "Not implemented") and
+  format-interpret it. The v0.1.5 printf fix
+  `TextColored(color, '%s', value)` therefore rendered the literal
+  `%s` and dropped the payload. All panel text now goes through
+  `TextUnformatted` (the binding's only non-formatting text call)
+  with `PushStyleColor`/`PopStyleColor` for color — `% p % e % c`
+  round-trips byte-identical, enforced by runtime and source-grep
+  tests that forbid every other `imgui.Text*` call in ui.lua.
+- **Settings crash on first load**: the settings library's no-file
+  branch ends in `defaults:copy(true)` — a `T{}` method — so plain
+  -table defaults crashed `load_settings` and the throw escaped the
+  load event, unloading the addon. Defaults now go through `T()`, the
+  whole init (and every save) is pcall'd, and failure degrades to
+  in-memory defaults plus the file fallback with one warning line.
+  Persistence can no longer take the addon down.
+- **Diagnostic gap closed**: `/whet panel` prints
+  `lines_rendered_last_frame` (counted inside the draw per emitted
+  text line) and `/whet selftest` reports the active settings
+  backend. "All green + empty screen" now names itself.
+
 ## Cleanup phase (v0.1.6)
 
 - **Persistent user state** (`config.lua`): level pins (per mob name —

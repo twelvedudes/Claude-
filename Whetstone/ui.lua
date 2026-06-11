@@ -7,14 +7,19 @@
     are marked with '~'.
 
     Ashita v4 ImGui binding semantics (verified against the official
-    AshitaXI/Ashita-v4beta addons - equipmon, imguistyle, tparty):
+    AshitaXI/Ashita-v4beta addons - equipmon, imguistyle, tparty -
+    and the SDK annotations in libs/annotations/SDK/IGuiManager.lua):
       - there is NO global `imgui`: require('imgui') is mandatory
         (HorizonXI shakedown crash, v0.1.0-beta)
       - by-ref arguments are Lua tables (M.visible = { true })
       - imgui.End() runs UNCONDITIONALLY after Begin, whatever Begin
         returned (canonical `if Begin(...) then ... end End()` shape)
-      - ImGuiWindowFlags_* / ImGuiCond_* are globals provided by Ashita
+      - ImGuiWindowFlags_* / ImGuiCond_* / ImGuiCol_* are globals
       - sizes and colors are plain Lua tables
+      - Text(text) / TextColored(color, text) take EXACTLY ONE text
+        argument and format-interpret it (TextV/TextColoredV are "Not
+        implemented"); the only safe call for dynamic strings is
+        TextUnformatted + PushStyleColor (v0.1.6 empty-panel bug)
 
     Pure rendering: all numbers come from advisor.evaluate(). The
     binding is swappable (tests preload a recording stub).
@@ -41,7 +46,13 @@ end
 
 -- Stamped into /whet panel output: if the field ever reports a state
 -- string without its [S#] tag, an old ui.lua is running somewhere.
-M.DRAW_VERSION = 'draw-v3-tagged'
+M.DRAW_VERSION = 'draw-v4-unformatted'
+
+-- Text lines emitted by the LAST completed draw. The v0.1.6 field bug
+-- was 'all-green dump + empty panel': every state check passed while
+-- zero payload reached the screen. This counter closes that gap -
+-- /whet panel prints it, so a silent render path names itself.
+M.lines_rendered = 0
 
 local COLOR_GAIN      = { 0.55, 1.00, 0.55, 1.0 }
 local COLOR_INFO      = { 0.70, 0.70, 0.70, 1.0 }
@@ -51,14 +62,27 @@ local COLOR_ERROR     = { 1.00, 0.35, 0.35, 1.0 }
 
 local MAX_LINES = 6
 
--- FIELD BUG (v0.1.4): ImGui Text/TextColored are printf-style; the
--- advisor's lines are full of literal '%' ('+90.0% melee'), which
--- fired conversions live ('% p' -> pointer hex, '% e' -> 3.78e-244)
--- and is a crash waiting on '% s'. EVERY dynamic string goes through
--- the '%s' format slot; nothing user-influenced is ever a format
--- string. (tests/test_ui.lua greps this file to enforce it.)
+-- FIELD BUG (v0.1.4 + v0.1.6): the Ashita v4 binding's Text and
+-- TextColored take EXACTLY ONE text argument (SDK annotations:
+-- `Text(text)`, `TextColored(color, text)`; the varargs forms TextV/
+-- TextColoredV are explicitly "Not implemented") and the C side
+-- treats that string as a printf FORMAT (v0.1.4: literal '% p'
+-- rendered pointer hex). The v0.1.5 fix imgui.TextColored(color,
+-- '%s', value) therefore rendered the literal '%s' and silently
+-- DROPPED the payload - an all-green panel with no content.
+--
+-- The only call that never formats is TextUnformatted (bound, takes
+-- the text pointer directly); color rides PushStyleColor, the
+-- canonical official-addon pattern (actionparse, blucheck).
+-- tests/test_ui.lua greps this file: TextUnformatted is the ONLY
+-- imgui.Text* call allowed here.
+local lines_this_frame = 0
+
 local function text(color, value)
-    imgui.TextColored(color, '%s', value)
+    imgui.PushStyleColor(ImGuiCol_Text, color)
+    imgui.TextUnformatted(tostring(value))
+    imgui.PopStyleColor(1)
+    lines_this_frame = lines_this_frame + 1
 end
 
 -- Every snapshot failure mode renders DISTINCTLY, and every branch
@@ -191,8 +215,11 @@ end
 
 function M.draw(report, haste, status)
     if not M.visible[1] then
+        M.lines_rendered = 0
         return
     end
+
+    lines_this_frame = 0
 
     imgui.SetNextWindowSize({ 360, 0 }, ImGuiCond_FirstUseEver)
 
@@ -222,6 +249,8 @@ function M.draw(report, haste, status)
     end
 
     imgui.End()
+
+    M.lines_rendered = lines_this_frame
 end
 
 return M
