@@ -54,6 +54,12 @@ if type(describe) ~= 'function' then
             end
         end,
 
+        is_false = function(value, msg)
+            if value ~= false then
+                error((msg or 'assert.is_false') .. ': got ' .. tostring(value), 2)
+            end
+        end,
+
         is_nil = function(value, msg)
             if value ~= nil then
                 error((msg or 'assert.is_nil') .. ': got ' .. tostring(value), 2)
@@ -209,6 +215,43 @@ describe('bit reader', function()
     end)
 end)
 
+-- Generic action builder: category + action id + plain results
+-- (damage, message), no additional effects.
+local function build_action_packet(category, action_id, results)
+    local w = Writer.new()
+
+    w:put(0x28, 8)
+    w:put(0, 8)
+    w:put(0, 16)
+    w:put(0, 8)
+
+    w:put(0x104, 32)       -- actor
+    w:put(1, 6)            -- target count
+    w:put(0, 4)            -- res_sum
+    w:put(category, 4)
+    w:put(action_id, 32)
+    w:put(0, 32)           -- info
+
+    w:put(0x10F, 32)       -- target id
+    w:put(#results, 4)
+
+    for _, result in ipairs(results) do
+        w:put(1, 3)            -- reaction
+        w:put(0, 2)            -- kind
+        w:put(0, 12)           -- animation
+        w:put(0, 5)            -- info
+        w:put(0, 2)            -- distortion
+        w:put(0, 3)            -- knockback
+        w:put(result[1], 17)   -- damage
+        w:put(result[2], 10)   -- message
+        w:put(0, 31)           -- modifier
+        w:put(0, 1)            -- no additional effect
+        w:put(0, 1)            -- no spikes
+    end
+
+    return w:tostring()
+end
+
 -- =====================================================================
 describe('action packet parsing', function()
     local action = D.parse_action(build_melee_packet())
@@ -273,6 +316,108 @@ describe('predicted-vs-observed log lines', function()
         assert.is_true(lines[1]:find('target=Test Crab') ~= nil)
     end)
 
+    it('stamps every line with a monotonic t= field', function()
+        D.set_expectations(
+        {
+            target_name = 'Test Crab',
+            swing =
+            {
+                expected = 130.5, base = 87, hit_rate = 0.95,
+                crit_rate = 0.08,
+                pdif = { lower = 1.54, upper = 2.0,
+                         spike_chance = 0.333 },
+            },
+        })
+
+        local old_clock = D.clock
+        D.clock = function() return 1042.123 end
+
+        local lines = D.observe(action, 0x104)
+        D.clock = old_clock
+
+        assert.is_true(lines[1]:find('t=1042%.123') ~= nil)
+    end)
+
+    it('emits the per-landed-swing mean next to the attempt mean', function()
+        D.set_expectations(
+        {
+            target_name = 'Test Crab',
+            swing =
+            {
+                expected = 130.5, base = 87, hit_rate = 0.95,
+                crit_rate = 0.08,
+                pdif = { lower = 1.54, upper = 2.0,
+                         spike_chance = 0.333 },
+            },
+        })
+
+        local lines = D.observe(action, 0x104)
+
+        -- landed mean = 130.5 / 0.95 = 137.4 (attempt mean / hit rate)
+        assert.is_true(lines[1]:find('predicted_mean=130.5') ~= nil)
+        assert.is_true(lines[1]:find('predicted_landed=137.4') ~= nil)
+    end)
+
+    it("labels misses 'miss', never other:15", function()
+        -- the first real field log left MSG_MISS unlabeled: the
+        -- analyzer had to match 'other:15'
+        D.set_expectations(
+        {
+            target_name = 'Test Crab',
+            swing =
+            {
+                expected = 130.5, base = 87, hit_rate = 0.95,
+                crit_rate = 0.08,
+                pdif = { lower = 1.54, upper = 2.0,
+                         spike_chance = 0.333 },
+            },
+        })
+
+        local miss_action = D.parse_action(build_action_packet(
+            D.CATEGORY_MELEE, 0, { { 0, D.MSG_MISS } }))
+        local lines = D.observe(miss_action, 0x104)
+
+        assert.are.equal(1, #lines)
+        assert.is_true(lines[1]:find('melee miss observed=0') ~= nil)
+        assert.is_nil(lines[1]:find('other:15'))
+    end)
+
+    it('counts landed vs rolled hits on weapon skill lines', function()
+        D.set_expectations(
+        {
+            target_name = 'Test Crab',
+            ws = { [16] = { name = 'raging_axe', expected = 411.5 } },
+        })
+
+        -- two rolled, one whiffed: observed sums the landed hit only
+        local ws_action = D.parse_action(build_action_packet(
+            D.CATEGORY_WS, 16,
+            { { 222, D.MSG_HIT }, { 0, D.MSG_MISS } }))
+        local lines = D.observe(ws_action, 0x104)
+
+        assert.are.equal(1, #lines)
+        assert.is_true(lines[1]:find('observed=222') ~= nil)
+        assert.is_true(lines[1]:find('hits=1/2') ~= nil)
+        assert.is_true(lines[1]:find('predicted_mean=411.5') ~= nil)
+    end)
+
+    it('logs a fully whiffed weapon skill as observed=0', function()
+        -- attempt-level WS_MEAN depends on whiffs reaching the log
+        D.set_expectations(
+        {
+            target_name = 'Test Crab',
+            ws = { [16] = { name = 'raging_axe', expected = 411.5 } },
+        })
+
+        local ws_action = D.parse_action(build_action_packet(
+            D.CATEGORY_WS, 16,
+            { { 0, D.MSG_MISS }, { 0, D.MSG_MISS } }))
+        local lines = D.observe(ws_action, 0x104)
+
+        assert.is_true(lines[1]:find('observed=0') ~= nil)
+        assert.is_true(lines[1]:find('hits=0/2') ~= nil)
+    end)
+
     it('ignores other actors', function()
         assert.are.equal(0, #D.observe(action, 0x999))
     end)
@@ -281,6 +426,53 @@ describe('predicted-vs-observed log lines', function()
         D.set_expectations(nil)
 
         assert.are.equal(0, #D.observe(action, 0x104))
+    end)
+end)
+
+-- =====================================================================
+describe('duplicate packet rejection (the re-injection finding)', function()
+    it('rejects an identical payload inside the window', function()
+        local now = 100.0
+
+        assert.is_false(D.is_duplicate('payload-A', now))
+        assert.is_true(D.is_duplicate('payload-A', now + 0.05))
+        assert.is_true(D.is_duplicate('payload-A', now + 0.19))
+    end)
+
+    it('accepts the same payload after the window', function()
+        local now = 200.0
+
+        assert.is_false(D.is_duplicate('payload-B', now))
+        assert.is_false(D.is_duplicate('payload-B',
+            now + D.DEDUP_WINDOW_S + 0.01))
+    end)
+
+    it('never confuses distinct payloads', function()
+        local now = 300.0
+
+        assert.is_false(D.is_duplicate('payload-C', now))
+        assert.is_false(D.is_duplicate('payload-D', now))
+    end)
+
+    it('a re-duplicate keeps refreshing the window', function()
+        -- three injected copies in quick succession: 2nd and 3rd both
+        -- rejected even though the 3rd is >window from the 1st
+        local now = 400.0
+
+        assert.is_false(D.is_duplicate('payload-E', now))
+        assert.is_true(D.is_duplicate('payload-E', now + 0.15))
+        assert.is_true(D.is_duplicate('payload-E', now + 0.30))
+    end)
+
+    it('sweeps expired entries so the table stays bounded', function()
+        for index = 1, 64 do
+            D.is_duplicate('sweep-' .. index, 500.0)
+        end
+
+        -- far in the future: the sweep collects everything expired and
+        -- fresh payloads still work
+        assert.is_false(D.is_duplicate('sweep-new', 600.0))
+        assert.is_true(D.is_duplicate('sweep-new', 600.1))
     end)
 end)
 
@@ -323,6 +515,12 @@ describe('session header', function()
         },
         target_name = 'Test Crab',
         level_range = { 20, 25 },
+        vintage =
+        {
+            items = 'phoenixffxi/Phoenix @ 0f3f8fc',
+            ws    = 'phoenixffxi/Phoenix @ 0f3f8fc',
+            mobs  = 'phoenixffxi/Phoenix @ 0f3f8fc',
+        },
     })
 
     local text = table.concat(header, '\n')
@@ -366,6 +564,24 @@ describe('session header', function()
 
     it('flags unpinned target ranges', function()
         assert.is_true(text:find('level_range=20%-25 UNPINNED') ~= nil)
+    end)
+
+    it('stamps the data vintage', function()
+        assert.is_true(text:find(
+            'data_vintage items=phoenixffxi/Phoenix @ 0f3f8fc') ~= nil)
+    end)
+
+    it('reports a check-narrowed level distinctly from a pin', function()
+        local narrowed = table.concat(D.session_header(
+        {
+            target_name   = 'Test Crab',
+            checked_level = 21,
+        }), '\n')
+
+        assert.is_true(narrowed:find(
+            'target=Test Crab checked_level=21 %(0x029 con result%)')
+            ~= nil)
+        assert.is_nil(narrowed:find('pinned_level'))
     end)
 
     it('omits zero-haste gear from the haste breakdown', function()

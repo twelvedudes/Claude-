@@ -252,6 +252,7 @@ def emit_lua(items: dict, source: str) -> str:
         '-- Source: ' + source,
         '-- itemId -> equipment stats; haste is 10000-based (375 = 3.75%)',
         'return {',
+        "    vintage = '%s'," % source.replace("'", "\\'"),
     ]
 
     for item_id in sorted(items):

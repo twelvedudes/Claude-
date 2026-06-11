@@ -39,6 +39,63 @@ M.MSG_CRIT = 67
 M.MSG_MISS = 15
 
 -- =====================================================================
+-- Monotonic millisecond stamps + duplicate-packet rejection
+-- =====================================================================
+
+-- Injectable monotonic clock (seconds, ms resolution): os.clock is
+-- process-monotonic under Ashita; tests substitute their own.
+M.clock = os.clock
+
+-- Wall time for humans + a monotonic t= for analysis: wall HH:MM:SS
+-- can repeat/jump, t never does, so de-dup and interval analysis ride
+-- t while the log stays readable.
+local function stamp()
+    return string.format('%s t=%.3f', os.date('%H:%M:%S'), M.clock())
+end
+
+-- FIELD FINDING (v0.1.7 log, Horizon): identical action packets were
+-- observed parsed 2-3x within the same second (3 identical hit18+miss
+-- pairs at 07:10:20; 12,14,12,14 at 07:10:27) - with 15+ addons
+-- loaded, packet re-injection makes the same raw payload arrive more
+-- than once. A genuine repeat of the SAME payload (same damage rolls
+-- on every hit) inside 200ms is overwhelmingly unlikely (swing rounds
+-- are seconds apart; multi-hits share one packet), so the raw payload
+-- string within a 200ms window is the de-dup key.
+M.DEDUP_WINDOW_S = 0.2
+
+local recent_payloads = {}
+local recent_count = 0
+
+function M.is_duplicate(payload, now)
+    now = now or M.clock()
+
+    -- bound the table: sweep expired entries once it grows
+    if recent_count > 32 then
+        for key, seen in pairs(recent_payloads) do
+            if now - seen >= M.DEDUP_WINDOW_S then
+                recent_payloads[key] = nil
+                recent_count = recent_count - 1
+            end
+        end
+    end
+
+    local seen = recent_payloads[payload]
+
+    if seen ~= nil and now - seen < M.DEDUP_WINDOW_S then
+        recent_payloads[payload] = now
+        return true
+    end
+
+    if seen == nil then
+        recent_count = recent_count + 1
+    end
+
+    recent_payloads[payload] = now
+
+    return false
+end
+
+-- =====================================================================
 -- Bit reader (unpackBitsBE-compatible)
 -- =====================================================================
 
@@ -148,16 +205,35 @@ end
 -- Feed a parsed action. Returns an array of log lines (possibly
 -- empty); the caller decides where they go.
 -- player_id: the local player's server id; only their actions count.
+--
+-- LINE SEMANTICS (mirrored in README + tools/analyze_swings.py):
+--   melee: one line PER SWING RESULT. 'hit'/'crit' lines are landed
+--     swings; 'miss' lines log observed=0. predicted_mean is the
+--     PER-ATTEMPT expectation (includes hit rate); predicted_landed
+--     is the per-LANDED-swing mean (crit-blended, no hit rate) -
+--     landed observations compare against predicted_landed.
+--   ws: one line PER USE (attempt). observed totals the landed hits
+--     (0 when everything whiffed), hits=landed/rolled. predicted_mean
+--     is the per-attempt expectation including hit rates, so ws
+--     compares attempt-to-attempt as-is.
 function M.observe(action, player_id)
     if not action or action.actor ~= player_id or not M.expectations then
         return {}
     end
 
     local lines = {}
-    local stamp = os.date('%H:%M:%S')
+    local when = stamp()
 
     if action.category == M.CATEGORY_MELEE then
         local predicted = M.expectations.swing
+
+        -- landed-swing mean: attempt expectation with the hit-rate
+        -- factor removed (melee_swing: expected = base * E[pDIF] * hr)
+        local landed_mean = -1
+
+        if predicted and predicted.hit_rate and predicted.hit_rate > 0 then
+            landed_mean = predicted.expected / predicted.hit_rate
+        end
 
         for _, target in ipairs(action.targets) do
             for _, result in ipairs(target.results) do
@@ -165,6 +241,8 @@ function M.observe(action, player_id)
 
                 if result.message == M.MSG_CRIT then
                     outcome = 'crit'
+                elseif result.message == M.MSG_MISS then
+                    outcome = 'miss'
                 elseif result.message ~= M.MSG_HIT then
                     outcome = 'other:' .. result.message
                 end
@@ -174,11 +252,12 @@ function M.observe(action, player_id)
                 -- spike outcome lands at exactly 1.0 x base.
                 lines[#lines + 1] = string.format(
                     '%s melee %s observed=%d predicted_mean=%.1f '
-                    .. 'base=%d spike=%.3f '
+                    .. 'predicted_landed=%.1f base=%d spike=%.3f '
                     .. 'pdif_range=%.3f-%.3f hit_rate=%.2f '
                     .. 'crit_rate=%.3f target=%s',
-                    stamp, outcome, result.damage,
+                    when, outcome, result.damage,
                     predicted and predicted.expected or -1,
+                    landed_mean,
                     predicted and predicted.base or -1,
                     predicted and predicted.pdif.spike_chance or -1,
                     predicted and predicted.pdif.lower or -1,
@@ -194,18 +273,26 @@ function M.observe(action, player_id)
 
         for _, target in ipairs(action.targets) do
             local total = 0
+            local rolled = 0
+            local landed = 0
 
             for _, result in ipairs(target.results) do
                 total = total + (result.damage or 0)
+                rolled = rolled + 1
+
+                if result.message ~= M.MSG_MISS then
+                    landed = landed + 1
+                end
             end
 
             lines[#lines + 1] = string.format(
                 '%s ws id=%d name=%s observed=%d predicted_mean=%s '
-                .. 'target=%s',
-                stamp, action.action_id,
+                .. 'hits=%d/%d target=%s',
+                when, action.action_id,
                 predicted and predicted.name or '?', total,
                 predicted and string.format('%.1f', predicted.expected)
                     or 'n/a',
+                landed, rolled,
                 M.expectations.target_name or '?')
         end
     end
@@ -254,6 +341,15 @@ function M.session_header(p)
 
     add('=== whetstone session %s ===', os.date('%Y-%m-%d %H:%M:%S'))
     add('version=%s profile=%s', p.version or '?', p.profile or 'phoenix')
+
+    -- Data vintage: which server commit the loaded tables came from,
+    -- so a log is interpretable after the tables move.
+    if p.vintage then
+        add('data_vintage items=%s ws=%s mobs=%s',
+            tostring(p.vintage.items or '?'),
+            tostring(p.vintage.ws or '?'),
+            tostring(p.vintage.mobs or '?'))
+    end
 
     local stats = p.stats or {}
     local s = stats.stats or {}
@@ -327,6 +423,9 @@ function M.session_header(p)
         if p.pinned_level then
             add('target=%s pinned_level=%d', p.target_name,
                 p.pinned_level)
+        elseif p.checked_level then
+            add('target=%s checked_level=%d (0x029 con result)',
+                p.target_name, p.checked_level)
         elseif p.level_range then
             add('target=%s level_range=%d-%d UNPINNED '
                 .. '(predictions use worst case)', p.target_name,

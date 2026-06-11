@@ -991,6 +991,7 @@ def emit_split(mobs: dict, accounting: dict, out_dir: Path,
     index_lines.append('-- zone id -> per-zone module; totals are')
     index_lines.append('-- asserted against extraction accounting')
     index_lines.append('return {')
+    index_lines.append('    vintage = %s,' % lua_string(source))
     index_lines.append('    total_entries = %d,' % split_total)
     index_lines.append('    zones = {')
 

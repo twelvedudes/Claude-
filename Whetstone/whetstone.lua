@@ -20,11 +20,8 @@
       /whet quest        toggle ranking of quest-locked WS (default off)
       /whet profile <p>  switch formulas profile (phoenix | lsb);
                          no argument prints the current one
-
-    All user state (pins, march override, quest toggle, profile, panel
-    visibility/position) persists per character via the Ashita
-    settings library (config/whetstone/<char>_<server>/settings.lua),
-    with a file fallback in the addon folder.
+      /whet checkdebug   dump raw 0x029 fields (con-check message-id
+                         discovery on non-LSB servers)
       /whet debug        toggle predicted-vs-observed swing logging to
                          <addon>/whetstone_swings.log (writes a full
                          session-state header on enable)
@@ -34,7 +31,18 @@
       /whet target       print raw target index / server id / name /
                          zone and whether the mob DB lookup hits
       /whet panel        dump the exact state the next frame renders
-                         (booleans + table identities + draw version)
+                         (booleans + table identities + draw version +
+                         lines_rendered_last_frame)
+
+    Level narrowing: /check results (0x029) narrow the target's level
+    automatically, cached per mob SERVER ID (same-name spawns can con
+    differently) until zone change. Precedence: pin > checked >
+    unconfirmed range.
+
+    All user state (pins, march override, quest toggle, profile, panel
+    visibility/position) persists per character via the Ashita
+    settings library (config/whetstone/<char>_<server>/settings.lua),
+    with a file fallback in the addon folder.
 
     This file is Ashita glue and needs an in-game shakedown; everything
     it calls is unit-tested pure Lua.
@@ -42,7 +50,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.7-beta'
+addon.version = '0.1.8-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -65,11 +73,43 @@ local state =
     march_override  = nil,
     assume_quest_ws = false,
     debug_log       = false,
+    check_debug     = false, -- /whet checkdebug: dump raw 0x029 fields
     last_report     = nil,
     last_haste      = nil,
     last_status     = nil,
     latched_error   = nil,
 }
+
+-- Con-check narrowing cache (0x029 battle messages): level keyed by
+-- the mob's SERVER ID, not its name - two same-name spawns can con
+-- different levels live. Cleared on zone change (server ids recycle);
+-- a respawn can reuse an id at a different level, so a re-check
+-- always overwrites. Precedence everywhere: pin > checked >
+-- unconfirmed.
+local checked = { zone = nil, by_id = {} }
+
+local function checked_level_for(zone, server_id)
+    if checked.zone ~= zone then
+        return nil
+    end
+
+    local entry = checked.by_id[server_id]
+
+    return entry and entry.level or nil, entry
+end
+
+local function remember_check(zone, server_id, level, difficulty)
+    if checked.zone ~= zone then
+        checked = { zone = zone, by_id = {} }
+    end
+
+    checked.by_id[server_id] =
+    {
+        level      = level,
+        difficulty = difficulty,
+        at         = os.clock(),
+    }
+end
 
 local data = { mobs = nil, ws = nil, items = nil }
 local mob_index = nil -- split layout: data/mobs/index.lua
@@ -527,6 +567,11 @@ ashita.events.register('command', 'whetstone_command', function(e)
             print(('[whetstone] profile is %s (available: %s)')
                 :format(cfg.profile, table.concat(names, ', ')))
         end
+    elseif args[2] == 'checkdebug' then
+        state.check_debug = not state.check_debug
+        print('[whetstone] 0x029 raw dump: '
+            .. (state.check_debug and 'ON (con-check id discovery)'
+                or 'OFF'))
     elseif args[2] == 'debug' then
         state.debug_log = not state.debug_log
         print('[whetstone] swing logging: '
@@ -758,15 +803,23 @@ snapshot = function()
                 and gear.sub.weapon.dmg or nil,
         },
         haste           = haste,
-        -- session pin wins; otherwise the persisted per-mob pin
+        -- Narrowing precedence: pin (session, then persisted per-mob)
+        -- > 0x029 con-check result (per server id) > unconfirmed range
         target          = { zone = zone, name = name,
                             level = state.pinned_level
-                                or cfg.pinned_levels[name] },
+                                or cfg.pinned_levels[name]
+                                or checked_level_for(zone,
+                                    target.server_id) },
+        checked_level   = checked_level_for(zone, target.server_id),
         data            = { mobs = mobs, ws = data.ws,
                             items = data.items },
         profile         = cfg.profile,
-        tp              = AshitaCore:GetMemoryManager():GetParty()
-            :GetMemberTP(0),
+        -- TP freshness: rank weapon skills at the TP they will FIRE
+        -- at - below 1000 a WS cannot be used (the fTP interpolator
+        -- would also flat-line at 1), so ranking clamps to the
+        -- [1000, 3000] usable band while the panel shows live TP.
+        tp              = math.min(3000, math.max(1000,
+            AshitaCore:GetMemoryManager():GetParty():GetMemberTP(0))),
         assume_quest_ws = state.assume_quest_ws,
         -- 75-era original zones are level-corrected; post-ToAU zones
         -- mostly not. TODO: zone table; default on for now.
@@ -895,8 +948,17 @@ write_session_header = function()
         buffs        = player.state.buffs,
         known_buffs  = player.BUFFS,
         target_name  = ok and snap and snap.target.name or nil,
-        pinned_level = state.pinned_level,
+        pinned_level = state.pinned_level
+            or (ok and snap and cfg.pinned_levels[snap.target.name]),
+        checked_level = ok and snap and snap.checked_level or nil,
         level_range  = level_range,
+        vintage      =
+        {
+            items = data.items and data.items.vintage,
+            ws    = data.ws and data.ws.vintage,
+            mobs  = (mob_index and mob_index.vintage)
+                or (data.mobs and data.mobs.vintage),
+        },
     }))
 end
 
@@ -1094,6 +1156,13 @@ ashita.events.register('packet_in', 'whetstone_swing_packet',
             return
         end
 
+        -- FIELD FINDING (first real log): identical payloads arrived
+        -- 2-3x within a second (other addons re-injecting). De-dup on
+        -- the RAW payload before parsing.
+        if swinglog.is_duplicate(event.data) then
+            return
+        end
+
         local ok, action = pcall(swinglog.parse_action, event.data)
 
         if not ok or not action then
@@ -1108,6 +1177,75 @@ ashita.events.register('packet_in', 'whetstone_swing_packet',
         if ok_obs then
             append_log(lines)
         end
+    end)
+
+-- 0x029 battle messages carry con-check results (level + difficulty
+-- for gaugeable mobs). ALWAYS listening - narrowing must not require
+-- debug mode - and latched like every other event path.
+ashita.events.register('packet_in', 'whetstone_check_packet',
+    function(event)
+        if event.id ~= player.PACKET_BATTLE_MESSAGE then
+            return
+        end
+
+        guarded('check_packet', function()
+            local message = player.parse_battle_message(event.data)
+
+            if not message then
+                return
+            end
+
+            -- /whet checkdebug: raw field dump for discovering the
+            -- message-id set on non-LSB servers (Horizon).
+            if state.check_debug then
+                print(('[whetstone] 0x029 msg=%d sender=%d target=%d '
+                    .. 'param=%d value=%d'):format(
+                    message.message_id, message.sender_id,
+                    message.target_id, message.param, message.value))
+            end
+
+            local kind, level, difficulty = player.classify_check(message)
+
+            if not kind then
+                return
+            end
+
+            -- Only MY checks narrow (the packet is addressed to the
+            -- checker, but stay strict in case of forwarding).
+            local my_id = AshitaCore:GetMemoryManager():GetParty()
+                :GetMemberServerId(0)
+
+            if message.sender_id ~= my_id then
+                return
+            end
+
+            if kind == 'impossible' then
+                print('[whetstone] check: impossible to gauge '
+                    .. '(NM-class, no level information)')
+                return
+            end
+
+            local zone = current_zone()
+
+            remember_check(zone, message.target_id, level, difficulty)
+
+            -- Name it when it concerns the current target.
+            local target = get_current_target()
+            local label = (target.valid
+                and target.server_id == message.target_id)
+                and target.name or ('id ' .. message.target_id)
+
+            print(('[whetstone] check: %s is Lv.%d (%s)')
+                :format(label, level, difficulty))
+
+            if state.debug_log then
+                append_log({ string.format(
+                    '%s t=%.3f narrow source=check target_id=%d '
+                    .. 'name=%s level=%d difficulty=%s',
+                    os.date('%H:%M:%S'), os.clock(),
+                    message.target_id, label, level, difficulty) })
+            end
+        end)
     end)
 
 local pos_settle = nil -- frames until the moved panel position saves

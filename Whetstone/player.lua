@@ -157,6 +157,82 @@ function M.parse_char_skills(data)
 end
 
 -- =====================================================================
+-- 0x029 battle message: con-check results (check narrowing)
+-- =====================================================================
+
+M.PACKET_BATTLE_MESSAGE = 0x029
+
+-- GP_SERV_COMMAND_BATTLE_MESSAGE layout
+-- (src/map/packets/s2c/0x029_battle_message.h, offsets include the
+-- 4-byte FFXI header):
+--   0x04 u32 UniqueNoCas   sender server id (the checking player)
+--   0x08 u32 UniqueNoTar   target server id (the mob)
+--   0x0C u32 Data          param  - for checks: mob level (GetMLevel
+--                          + EXP_LVL_MOD)
+--   0x10 u32 Data2         value  - for checks: 64 + EMobDifficulty
+--   0x14 u16 ActIndexCas   0x16 u16 ActIndexTar
+--   0x18 u16 MessageNum    0x1A u8 Type
+function M.parse_battle_message(data)
+    if #data < 0x1B then
+        return nil
+    end
+
+    return
+    {
+        sender_id  = u32(data, 0x04),
+        target_id  = u32(data, 0x08),
+        param      = i32(data, 0x0C),
+        value      = i32(data, 0x10),
+        sender_idx = u16(data, 0x14),
+        target_idx = u16(data, 0x16),
+        message_id = u16(data, 0x18),
+    }
+end
+
+-- /check message ids (src/map/packets/c2s/0x0dd_equip_inspect.cpp):
+-- the level-bearing message is CheckDefault = 174 (enums/msg_basic.h)
+-- offset by -1/+1 for high/low defense and -3/+3 for high/low evasion
+-- -> the full gaugeable set is [170, 178]. 249 = CheckImpossibleToGauge
+-- (NM/battlefield: NO level in param). These are LSB/Phoenix values;
+-- other forks may differ - /whet checkdebug exists to discover theirs.
+M.CHECK_MESSAGE_MIN  = 170
+M.CHECK_MESSAGE_MAX  = 178
+M.CHECK_IMPOSSIBLE   = 249
+
+-- EMobDifficulty (src/map/utils/charutils.h), decoded from Data2 - 64.
+M.CHECK_DIFFICULTY =
+{
+    [0] = 'too weak',         [1] = 'incredibly easy prey',
+    [2] = 'easy prey',        [3] = 'decent challenge',
+    [4] = 'even match',       [5] = 'tough',
+    [6] = 'very tough',       [7] = 'incredibly tough',
+}
+
+-- Classify a parsed 0x029. Returns:
+--   'level', level, difficulty_name   gaugeable check result
+--   'impossible'                      NM-class, no level information
+--   nil                               not a check message
+function M.classify_check(message)
+    if not message then
+        return nil
+    end
+
+    if message.message_id == M.CHECK_IMPOSSIBLE then
+        return 'impossible'
+    end
+
+    if message.message_id >= M.CHECK_MESSAGE_MIN
+        and message.message_id <= M.CHECK_MESSAGE_MAX then
+        local difficulty = message.value - 64
+
+        return 'level', message.param,
+            M.CHECK_DIFFICULTY[difficulty] or ('difficulty ' .. difficulty)
+    end
+
+    return nil
+end
+
+-- =====================================================================
 -- Buff-based haste (magic estimated, see header)
 -- =====================================================================
 

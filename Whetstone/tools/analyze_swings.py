@@ -15,9 +15,24 @@ verdict per beta-checklist item:
                   predicted melee crit rate (GetCritHitRate path),
                   Wilson 95% CI - run on a singleton target so dDEX
                   is exact
-    WS_MEAN       per-WS observed mean vs prediction; a consistent
-                  ~+10% excess on WSC-heavy skills suggests the legacy
-                  alpha assumption is wrong (Adoulin rules live)
+    MELEE_MEAN    LANDED-to-LANDED: mean observed damage over landed
+                  swings (hit + crit) vs predicted_landed (the
+                  per-landed-swing crit-blended mean) - never compares
+                  landed observations against the per-attempt mean
+    WS_MEAN       per-WS observed mean vs prediction, ATTEMPT-to-
+                  ATTEMPT: ws lines log every use including whiffs
+                  (observed=0), matching predicted_mean which includes
+                  hit rates; a consistent ~+10% excess on WSC-heavy
+                  skills suggests the legacy alpha assumption is wrong
+
+LINE SEMANTICS (must match swinglog.lua observe()):
+    melee lines: one per swing RESULT. 'hit'/'crit' = landed (observed
+    is the landed damage); 'miss' (legacy logs: 'other:15') logs
+    observed=0. predicted_mean = per-ATTEMPT expectation (includes hit
+    rate); predicted_landed = per-LANDED-swing mean (no hit rate).
+    ws lines: one per USE. observed sums the landed hits (0 on a full
+    whiff), hits=landed/rolled.
+    Every line carries wall time plus a monotonic t=<seconds.ms>.
 
 Each check reports PASS / FAIL / INSUFFICIENT_DATA with swing counts.
 Pure stdlib; no scipy.
@@ -33,9 +48,12 @@ import re
 import sys
 from collections import defaultdict
 
+# predicted_landed= and hits= are optional: logs from <= v0.1.7 lack
+# them and must keep parsing.
 MELEE_RE = re.compile(
     r'melee (?P<outcome>\S+) observed=(?P<observed>\d+) '
     r'predicted_mean=(?P<mean>-?[\d.]+) '
+    r'(?:predicted_landed=(?P<landed>-?[\d.]+) )?'
     r'base=(?P<base>-?\d+) spike=(?P<spike>-?[\d.]+) '
     r'pdif_range=(?P<lower>-?[\d.]+)-(?P<upper>-?[\d.]+) '
     r'hit_rate=(?P<hit_rate>-?[\d.]+) '
@@ -43,10 +61,15 @@ MELEE_RE = re.compile(
 
 WS_RE = re.compile(
     r'ws id=(?P<id>\d+) name=(?P<name>\S+) observed=(?P<observed>\d+) '
-    r'predicted_mean=(?P<mean>\S+) target=(?P<target>.+)$')
+    r'predicted_mean=(?P<mean>\S+) '
+    r'(?:hits=(?P<hits_landed>\d+)/(?P<hits_rolled>\d+) )?'
+    r'target=(?P<target>.+)$')
 
 MELEE_RANDOM_MAX = 1.05
-MISS_MESSAGE = 'other:15'
+
+# 'miss' since v0.1.8; 'other:15' in older logs (MSG_MISS was parsed
+# but never labeled).
+MISS_OUTCOMES = {'miss', 'other:15'}
 
 # At the Phoenix cap the question is "is the ceiling 95 or 99": the CI
 # must exclude the competing hypothesis to call it.
@@ -80,6 +103,8 @@ def parse_log(text: str) -> dict:
                 'outcome': row['outcome'],
                 'observed': int(row['observed']),
                 'mean': float(row['mean']),
+                'landed_mean': None if row['landed'] is None
+                               else float(row['landed']),
                 'base': int(row['base']),
                 'spike': float(row['spike']),
                 'lower': float(row['lower']),
@@ -98,6 +123,10 @@ def parse_log(text: str) -> dict:
                 'observed': int(row['observed']),
                 'mean': None if row['mean'] == 'n/a'
                         else float(row['mean']),
+                'hits_landed': None if row['hits_landed'] is None
+                               else int(row['hits_landed']),
+                'hits_rolled': None if row['hits_rolled'] is None
+                               else int(row['hits_rolled']),
                 'target': row['target'],
             })
 
@@ -108,7 +137,7 @@ def check_hit_ceiling(melee: list) -> dict:
     """Miss rate over swings logged at the predicted ceiling."""
     at_cap = [row for row in melee if row['hit_rate'] >= 0.94]
     total = len(at_cap)
-    misses = sum(1 for row in at_cap if row['outcome'] == MISS_MESSAGE)
+    misses = sum(1 for row in at_cap if row['outcome'] in MISS_OUTCOMES)
 
     result = {'check': 'HIT_CEILING', 'swings': total, 'misses': misses}
 
@@ -282,6 +311,52 @@ def check_crit_rate(melee: list) -> dict:
     return result
 
 
+def check_melee_mean(melee: list) -> dict:
+    """LANDED-to-LANDED: observed mean over landed swings (hit + crit)
+    vs predicted_landed. Comparing landed observations against the
+    per-ATTEMPT mean would run systematically hot by 1/hit_rate."""
+    landed = [row for row in melee
+              if row['outcome'] in ('hit', 'crit')
+              and row['landed_mean'] is not None
+              and row['landed_mean'] > 0]
+
+    result = {'check': 'MELEE_MEAN', 'swings': len(landed)}
+
+    if len(landed) < 100:
+        result['verdict'] = 'INSUFFICIENT_DATA'
+        result['detail'] = ('need >= 100 landed swings with '
+                            'predicted_landed (have %d; logs from '
+                            '<= v0.1.7 lack the field)' % len(landed))
+        return result
+
+    observed = [row['observed'] for row in landed]
+    predicted = sum(row['landed_mean'] for row in landed) / len(landed)
+    mean = sum(observed) / len(observed)
+    variance = (sum((x - mean) ** 2 for x in observed)
+                / (len(observed) - 1))
+    stderr = math.sqrt(variance / len(observed))
+
+    low, high = mean - 1.96 * stderr, mean + 1.96 * stderr
+    ratio = mean / predicted if predicted else float('inf')
+
+    result['mean'] = mean
+    result['predicted'] = predicted
+    result['ratio'] = ratio
+
+    if low <= predicted <= high:
+        result['verdict'] = 'PASS'
+        result['detail'] = ('landed mean %.1f vs predicted_landed %.1f '
+                            '(ratio %.3f, CI [%.1f, %.1f])'
+                            % (mean, predicted, ratio, low, high))
+    else:
+        result['verdict'] = 'FAIL'
+        result['detail'] = ('landed mean %.1f vs predicted_landed %.1f '
+                            '(ratio %.3f) outside CI [%.1f, %.1f]'
+                            % (mean, predicted, ratio, low, high))
+
+    return result
+
+
 def check_ws_mean(ws: list) -> list:
     """Per weapon skill: observed mean within the CI of the prediction.
     A consistent ~+10% excess flags the legacy-alpha assumption."""
@@ -353,6 +428,7 @@ def analyze(text: str) -> list:
         check_pdif_bounds(parsed['melee']),
         check_spike(parsed['melee']),
         check_crit_rate(parsed['melee']),
+        check_melee_mean(parsed['melee']),
     ]
     results.extend(check_ws_mean(parsed['ws']))
 

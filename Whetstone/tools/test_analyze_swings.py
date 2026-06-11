@@ -27,6 +27,23 @@ def ws_line(name, observed, mean=400.0):
             'predicted_mean=%.1f target=Test Crab' % (name, observed, mean))
 
 
+# v0.1.8+ line shapes: monotonic t= stamp, 'miss' label,
+# predicted_landed= on melee, hits= on ws.
+def melee_line_v2(outcome, observed, landed_mean=157.9, base=100,
+                  hit_rate=0.95):
+    return ('12:00:00 t=1042.123 melee %s observed=%d '
+            'predicted_mean=150.0 predicted_landed=%.1f '
+            'base=%d spike=0.000 pdif_range=1.540-2.000 hit_rate=%.2f '
+            'crit_rate=0.100 target=Test Crab'
+            % (outcome, observed, landed_mean, base, hit_rate))
+
+
+def ws_line_v2(name, observed, mean=400.0, landed=2, rolled=2):
+    return ('12:00:00 t=1042.456 ws id=36 name=%s observed=%d '
+            'predicted_mean=%.1f hits=%d/%d target=Test Crab'
+            % (name, observed, mean, landed, rolled))
+
+
 class WilsonTests(unittest.TestCase):
     def test_interval_brackets_the_point_estimate(self):
         low, high = X.wilson_interval(20, 400)
@@ -179,6 +196,74 @@ class WsMeanTests(unittest.TestCase):
         results = X.check_ws_mean(X.parse_log('\n'.join(lines))['ws'])
 
         self.assertEqual('INSUFFICIENT_DATA', results[0]['verdict'])
+
+
+class V2LineFormatTests(unittest.TestCase):
+    def test_v2_melee_parses_with_landed_mean_and_t_stamp(self):
+        parsed = X.parse_log(melee_line_v2('hit', 160))['melee']
+
+        self.assertEqual(1, len(parsed))
+        self.assertEqual(160, parsed[0]['observed'])
+        self.assertAlmostEqual(157.9, parsed[0]['landed_mean'])
+
+    def test_v1_melee_still_parses_with_landed_none(self):
+        parsed = X.parse_log(melee_line('hit', 160))['melee']
+
+        self.assertEqual(1, len(parsed))
+        self.assertIsNone(parsed[0]['landed_mean'])
+
+    def test_miss_label_counts_for_hit_ceiling(self):
+        # both the new 'miss' label and the legacy 'other:15' count
+        lines = [melee_line_v2('hit', 150)] * 380 \
+            + [melee_line_v2('miss', 0)] * 10 \
+            + [melee_line('other:15', 0)] * 10
+        result = X.check_hit_ceiling(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual(400, result['swings'])
+        self.assertEqual(20, result['misses'])
+        self.assertEqual('PASS', result['verdict'])
+
+    def test_v2_ws_parses_hits(self):
+        parsed = X.parse_log(ws_line_v2('raging_axe', 0,
+                                        landed=0, rolled=2))['ws']
+
+        self.assertEqual(1, len(parsed))
+        self.assertEqual(0, parsed[0]['observed'])
+        self.assertEqual(0, parsed[0]['hits_landed'])
+        self.assertEqual(2, parsed[0]['hits_rolled'])
+
+    def test_v1_ws_still_parses(self):
+        parsed = X.parse_log(ws_line('raging_axe', 400))['ws']
+
+        self.assertEqual(1, len(parsed))
+        self.assertIsNone(parsed[0]['hits_landed'])
+
+
+class MeleeMeanTests(unittest.TestCase):
+    def test_landed_to_landed_pass(self):
+        # landed swings around the landed mean: must NOT be compared
+        # against the attempt mean (150 here vs landed 157.9)
+        lines = ([melee_line_v2('hit', 150)] * 60
+                 + [melee_line_v2('hit', 166)] * 60
+                 + [melee_line_v2('miss', 0)] * 40)
+        result = X.check_melee_mean(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('PASS', result['verdict'])
+        self.assertEqual(120, result['swings'])  # misses excluded
+
+    def test_systematic_excess_fails(self):
+        lines = [melee_line_v2('hit', 190)] * 150
+        result = X.check_melee_mean(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('FAIL', result['verdict'])
+
+    def test_legacy_logs_are_insufficient(self):
+        # v1 lines lack predicted_landed: the check must say so, not
+        # silently compare against the wrong mean
+        lines = [melee_line('hit', 160)] * 300
+        result = X.check_melee_mean(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('INSUFFICIENT_DATA', result['verdict'])
 
 
 class EndToEndTests(unittest.TestCase):

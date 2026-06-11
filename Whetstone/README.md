@@ -233,6 +233,38 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
 
+## Consolidated phase (v0.1.8)
+
+- **0x029 check narrowing**: `/check` results narrow the target's
+  level automatically. The packet
+  (`src/map/packets/s2c/0x029_battle_message.h` + the `/check`
+  handler in `0x0dd_equip_inspect.cpp`) carries the mob level in
+  `Data` and `64 + EMobDifficulty` in `Data2`; gaugeable message ids
+  are `174 ±1 (def) ±3 (eva)` = [170, 178], 249 = impossible to
+  gauge (no level). Levels cache per mob SERVER ID (same-name spawns
+  can con differently), clear on zone change, and narrow with
+  precedence pin > checked > unconfirmed everywhere (advisor, panel,
+  session header, narrow events in the swing log). `/whet checkdebug`
+  dumps raw 0x029 fields for id discovery on non-LSB servers.
+- **Swing log integrity** (first real log findings): raw-payload
+  de-dup inside a 200 ms window kills re-injected duplicates (3
+  identical hit+miss pairs in one second, 15+ addons loaded); every
+  line carries a monotonic `t=<s.ms>`; misses are labeled `miss`
+  (the analyzer accepts legacy `other:15` too).
+- **Landed vs attempt semantics made explicit**: melee lines now log
+  `predicted_landed` (per-landed-swing mean) next to `predicted_mean`
+  (per-attempt, includes hit rate); the analyzer's new MELEE_MEAN
+  check compares landed-to-landed and WS_MEAN stays
+  attempt-to-attempt (whiffed WS log `observed=0`, plus
+  `hits=landed/rolled`).
+- **WS TP freshness**: rankings clamp TP to the usable [1000, 3000]
+  band (below 1000 the fTP interpolator flat-lines and no WS can
+  fire).
+- **Vintage stamping**: generated tables embed their source label
+  (`vintage` key); the session header logs
+  `data_vintage items=... ws=... mobs=...` so old logs stay
+  interpretable after the tables move.
+
 ## Field fixes (v0.1.7)
 
 - **Empty panel with an all-green dump**: the Ashita binding's
@@ -417,6 +449,18 @@ Checklist (compare `whetstone_swings.log` against predictions):
 4. **95% cap** - acc-capped vs a trivially low-evasion mob: miss rate
    converges to 5% (never ~1%, which would mean the 99% cap is live
    and the soa module is off).
+5. **Unarmed/H2H base damage** - barehanded MNK swings vs a pinned
+   mob: observed/base must respect the pDIF cap. Our base is
+   RE-VERIFIED against Phoenix source (itemutils.cpp do_init:
+   unarmedH2H D=0, plain unarmed D=3;
+   physical_utilities.lua calculateAttackDamage:
+   `floor(skill * 0.11) + 3` natural damage both fists): the first
+   Horizon log showed observed/base ratios EXCEEDING the predicted
+   cap - expected custom-server noise (Horizon is not LSB-derived),
+   but the question stays open until a Phoenix H2H session passes.
+   One caveat inside our model: the server's natural-damage skill is
+   `getSkillLevel` (includes +skill gear); ours is the parsed 0x062
+   base skill - H2H+skill gear will undershoot base until modeled.
 
 Also verify during plumbing shakedown: the DEX-to-accuracy multiplier
 (`dex_acc_multiplier` 0.75 vs the pre-ToAU 0.5 - Phoenix's deployed

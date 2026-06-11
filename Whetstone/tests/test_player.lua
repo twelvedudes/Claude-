@@ -225,6 +225,83 @@ describe('char skills packet (0x062)', function()
 end)
 
 -- =====================================================================
+describe('battle message packet (0x029, con checks)', function()
+    -- GP_SERV_COMMAND_BATTLE_MESSAGE: header, then UniqueNoCas u32,
+    -- UniqueNoTar u32, Data u32, Data2 u32, ActIndexCas u16,
+    -- ActIndexTar u16, MessageNum u16, Type u8 + pad
+    local function build_battle_message(sender, target, param, value,
+                                        message_id)
+        return table.concat(
+        {
+            string.char(0x29, 0x1C, 0x00, 0x00), -- header
+            le32(sender), le32(target),
+            le32(param), le32(value),
+            le16(0x0101), le16(0x0102),
+            le16(message_id),
+            string.char(0, 0),
+        })
+    end
+
+    it('parses the check-result fields', function()
+        -- /check on a Lv.21 even match: param=21, value=64+4,
+        -- MessageNum=CheckDefault(174)
+        local message = P.parse_battle_message(
+            build_battle_message(0x10004242, 0x1060AAAA, 21, 68, 174))
+
+        assert.are.equal(0x10004242, message.sender_id)
+        assert.are.equal(0x1060AAAA, message.target_id)
+        assert.are.equal(21, message.param)
+        assert.are.equal(68, message.value)
+        assert.are.equal(174, message.message_id)
+    end)
+
+    it('classifies all gaugeable check messages (174 +/-1 def +/-3 eva)',
+    function()
+        -- the def/eva hints offset the id: full set [170, 178]
+        for _, id in ipairs({ 170, 171, 173, 174, 175, 177, 178 }) do
+            local kind, level, difficulty = P.classify_check(
+                P.parse_battle_message(
+                    build_battle_message(1, 2, 21, 68, id)))
+
+            assert.are.equal('level', kind, 'message id ' .. id)
+            assert.are.equal(21, level)
+            assert.are.equal('even match', difficulty)
+        end
+    end)
+
+    it('decodes the difficulty from Data2 - 64', function()
+        local _, _, weak = P.classify_check(P.parse_battle_message(
+            build_battle_message(1, 2, 5, 64, 174)))
+        local _, _, it_ = P.classify_check(P.parse_battle_message(
+            build_battle_message(1, 2, 80, 71, 174)))
+
+        assert.are.equal('too weak', weak)
+        assert.are.equal('incredibly tough', it_)
+    end)
+
+    it('flags impossible-to-gauge (249) without a level', function()
+        local kind = P.classify_check(P.parse_battle_message(
+            build_battle_message(1, 2, 0, 0, 249)))
+
+        assert.are.equal('impossible', kind)
+    end)
+
+    it('ignores non-check battle messages', function()
+        -- ordinary battle messages share the packet: never narrow
+        assert.is_nil(P.classify_check(P.parse_battle_message(
+            build_battle_message(1, 2, 100, 0, 1))))
+        assert.is_nil(P.classify_check(P.parse_battle_message(
+            build_battle_message(1, 2, 100, 0, 169))))
+        assert.is_nil(P.classify_check(P.parse_battle_message(
+            build_battle_message(1, 2, 100, 0, 179))))
+    end)
+
+    it('rejects truncated packets', function()
+        assert.is_nil(P.parse_battle_message(string.char(0x29, 0x08)))
+        assert.is_nil(P.classify_check(nil))
+    end)
+end)
+
 describe('haste from buffs', function()
     it('sums magic haste per buff instance and flags it estimated', function()
         -- Haste (0.1465 exact-by-source) + double March (estimated)

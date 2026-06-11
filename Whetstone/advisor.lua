@@ -559,7 +559,9 @@ function M.evaluate(p)
 
     if p.data and p.data.ws then
         for name, entry in pairs(p.data.ws) do
-            local usable = entry.skill == weapon.skill
+            -- the generated table carries a top-level `vintage` string
+            local usable = type(entry) == 'table'
+                and entry.skill == weapon.skill
                 and M.ws_usable(entry, player, p.assume_quest_ws)
 
             if usable and M.ws_out_of_model(entry) then

@@ -376,6 +376,7 @@ def emit_lua(database: dict, source: str) -> str:
         '-- Source: ' + source,
         '-- Era WS parameters; params are verbatim from the server scripts',
         'return {',
+        "    vintage = '%s'," % source.replace("'", "\\'"),
     ]
 
     for name in sorted(database):
