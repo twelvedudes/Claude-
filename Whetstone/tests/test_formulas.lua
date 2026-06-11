@@ -550,6 +550,28 @@ describe('pDIF', function()
         assert.is_true(r.at_cap)
     end)
 
+    it('roll bounds are the POST-multiplier band; spike stays exact', function()
+        -- v0.1.10 field finding: observed ratios cluster at
+        -- upper * 1.05 because the FINAL roll is uniform[lower,upper]
+        -- x uniform{1.00..1.05}. The spike is NOT in that band: the
+        -- source early-returns exactly 1.0 BEFORE the melee random
+        -- factor (calculateMeleePDIF: `return 1.0` precedes step 4).
+        -- wRatio 2, great axe, lsb caps: lower sits in the < 2.44
+        -- branch (2 x 1176/1024 - 775/1024 = 1.5400390625), upper in
+        -- the >= 1.5 branch (2 + 0.375, uncapped under lsb)
+        local r = F.melee_pdif(
+        {
+            attack = 600, defense = 300, weapon = 'great_axe',
+            profile = 'lsb',
+        })
+
+        assert.near(1.5400390625, r.lower, 1e-12)
+        assert.near(2.375, r.upper, 1e-12)
+        -- final band: lower x 1.00 .. upper x 1.05
+        assert.near(1.5400390625, r.roll_min, 1e-12)
+        assert.near(2.49375, r.roll_max, 1e-12)
+    end)
+
     it('adds +1 wRatio and +1 cap on crits', function()
         -- attack 1000 def 500 crit, scythe: wRatio 3, cap 4 + 1 = 5
         -- upper = min(3.375, 5), lower = min(3 - 0.375, 5) = 2.625

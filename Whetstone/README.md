@@ -235,6 +235,35 @@ python3 Whetstone/tools/extract_items.py --server /path/to/Phoenix \
 All three are fast (seconds) and the outputs load in Lua 5.1. Remember:
 **these files ship in the release zip** even though they are gitignored.
 
+## Field fixes (v0.1.11)
+
+From an independent analyzer pass over a real Horizon log:
+
+- **pDIF band semantics**: the logged `pdif_range=` was the
+  PRE-multiplier roll bounds; observed ratios clustered at exactly
+  `upper x 1.05` because the final damage is
+  `uniform[lower, upper] x uniform{1.00..1.05}`. Swing lines now log
+  `pdif_final=` — the post-multiplier band straight from
+  `melee_pdif.roll_min/roll_max` (which were already correct, as was
+  `expected` with its 1.025 mean factor — only the log was wrong).
+  One deliberate deviation from the report: the SPIKE stays exactly
+  `1.0 x base`, not a 1.00-1.05 band — `calculateMeleePDIF`
+  early-returns 1.0 BEFORE the melee-random step, and the Horizon
+  data's own "spike legacy PASS" agrees. The analyzer parses both
+  formats (legacy `pdif_range` is normalized by `x 1.05` at parse).
+- **`tp=` on ws lines**: the TP-freshness clamp landed in v0.1.8 but
+  the logger never carried the field; ws lines now log the TP the
+  prediction assumed.
+- **Session-header timing**: a header written before the 0x061/0x062
+  packets resolve (weapon=nil) is re-emitted as a
+  `session UPDATE (state resolved mid-session)` block on the first
+  successful snapshot.
+- **HIT_RATE_POOLED**: new analyzer check — observed landed fraction
+  over ALL swings vs the pooled predicted hit rate (Wilson CI),
+  complementing HIT_CEILING which only judges at-cap swings. The
+  independent run had this check; ours didn't — a guaranteed verdict
+  difference, now closed.
+
 ## Field fixes (v0.1.10)
 
 Live bug, exact repro: check one Wild Rabbit → Lv.4 (checked); every

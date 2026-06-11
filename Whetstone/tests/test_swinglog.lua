@@ -300,6 +300,7 @@ describe('predicted-vs-observed log lines', function()
                 hit_rate = 0.95,
                 crit_rate = 0.08,
                 pdif = { lower = 1.54, upper = 2.0,
+                         roll_min = 1.54, roll_max = 2.1,
                          spike_chance = 0.333 },
             },
         })
@@ -316,6 +317,29 @@ describe('predicted-vs-observed log lines', function()
         assert.is_true(lines[1]:find('target=Test Crab') ~= nil)
     end)
 
+    it('logs the FINAL pdif band (post melee random), never the raw '
+        .. 'roll bounds', function()
+        -- v0.1.10 field finding: pdif_range= excluded the 1.00-1.05
+        -- multiplier; observed ratios clustered at upper x 1.05
+        D.set_expectations(
+        {
+            target_name = 'Test Crab',
+            swing =
+            {
+                expected = 130.5, base = 87, hit_rate = 0.95,
+                crit_rate = 0.08,
+                pdif = { lower = 1.54, upper = 2.0,
+                         roll_min = 1.54, roll_max = 2.1,
+                         spike_chance = 0.333 },
+            },
+        })
+
+        local lines = D.observe(action, 0x104)
+
+        assert.is_true(lines[1]:find('pdif_final=1.540%-2.100') ~= nil)
+        assert.is_nil(lines[1]:find('pdif_range'))
+    end)
+
     it('stamps every line with a monotonic t= field', function()
         D.set_expectations(
         {
@@ -325,6 +349,7 @@ describe('predicted-vs-observed log lines', function()
                 expected = 130.5, base = 87, hit_rate = 0.95,
                 crit_rate = 0.08,
                 pdif = { lower = 1.54, upper = 2.0,
+                         roll_min = 1.54, roll_max = 2.1,
                          spike_chance = 0.333 },
             },
         })
@@ -347,6 +372,7 @@ describe('predicted-vs-observed log lines', function()
                 expected = 130.5, base = 87, hit_rate = 0.95,
                 crit_rate = 0.08,
                 pdif = { lower = 1.54, upper = 2.0,
+                         roll_min = 1.54, roll_max = 2.1,
                          spike_chance = 0.333 },
             },
         })
@@ -369,6 +395,7 @@ describe('predicted-vs-observed log lines', function()
                 expected = 130.5, base = 87, hit_rate = 0.95,
                 crit_rate = 0.08,
                 pdif = { lower = 1.54, upper = 2.0,
+                         roll_min = 1.54, roll_max = 2.1,
                          spike_chance = 0.333 },
             },
         })
@@ -386,7 +413,8 @@ describe('predicted-vs-observed log lines', function()
         D.set_expectations(
         {
             target_name = 'Test Crab',
-            ws = { [16] = { name = 'raging_axe', expected = 411.5 } },
+            ws = { [16] = { name = 'raging_axe', expected = 411.5,
+                            tp = 1300 } },
         })
 
         -- two rolled, one whiffed: observed sums the landed hit only
@@ -399,6 +427,8 @@ describe('predicted-vs-observed log lines', function()
         assert.is_true(lines[1]:find('observed=222') ~= nil)
         assert.is_true(lines[1]:find('hits=1/2') ~= nil)
         assert.is_true(lines[1]:find('predicted_mean=411.5') ~= nil)
+        -- the TP the prediction assumed travels with the line
+        assert.is_true(lines[1]:find('tp=1300') ~= nil)
     end)
 
     it('logs a fully whiffed weapon skill as observed=0', function()
@@ -569,6 +599,21 @@ describe('session header', function()
     it('stamps the data vintage', function()
         assert.is_true(text:find(
             'data_vintage items=phoenixffxi/Phoenix @ 0f3f8fc') ~= nil)
+    end)
+
+    it('marks a mid-session re-emit as an UPDATE block', function()
+        local update = table.concat(D.session_header(
+        {
+            update       = true,
+            version      = '0.1.11',
+            weapon_skill = 'great_axe',
+        }), '\n')
+
+        assert.is_true(update:find(
+            'session UPDATE.*state resolved mid%-session') ~= nil)
+
+        -- and the normal header never carries the marker
+        assert.is_nil(text:find('UPDATE'))
     end)
 
     it('reports a check-narrowed level distinctly from a pin', function()

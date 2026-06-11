@@ -44,6 +44,23 @@ def ws_line_v2(name, observed, mean=400.0, landed=2, rolled=2):
             % (name, observed, mean, landed, rolled))
 
 
+# v0.1.11+ shapes: pdif_final= is the POST-multiplier band; ws lines
+# carry tp= (the TP the prediction assumed).
+def melee_line_v3(outcome, observed, lower=1.540, upper=2.100,
+                  hit_rate=0.95, base=100):
+    return ('12:00:00 t=1042.789 melee %s observed=%d '
+            'predicted_mean=150.0 predicted_landed=157.9 '
+            'base=%d spike=0.000 pdif_final=%.3f-%.3f hit_rate=%.2f '
+            'crit_rate=0.100 target=Test Crab'
+            % (outcome, observed, base, lower, upper, hit_rate))
+
+
+def ws_line_v3(name, observed, mean=400.0, tp=1000, landed=2, rolled=2):
+    return ('12:00:00 t=1042.999 ws id=36 name=%s observed=%d '
+            'predicted_mean=%.1f tp=%d hits=%d/%d target=Test Crab'
+            % (name, observed, mean, tp, landed, rolled))
+
+
 class WilsonTests(unittest.TestCase):
     def test_interval_brackets_the_point_estimate(self):
         low, high = X.wilson_interval(20, 400)
@@ -237,6 +254,74 @@ class V2LineFormatTests(unittest.TestCase):
 
         self.assertEqual(1, len(parsed))
         self.assertIsNone(parsed[0]['hits_landed'])
+
+
+class PdifFinalFormatTests(unittest.TestCase):
+    def test_pdif_final_bounds_are_used_as_is(self):
+        parsed = X.parse_log(
+            melee_line_v3('hit', 160, lower=1.625, upper=2.494))['melee']
+
+        self.assertAlmostEqual(1.625, parsed[0]['lower'])
+        self.assertAlmostEqual(2.494, parsed[0]['upper'])
+
+    def test_legacy_pdif_range_is_normalized_to_the_final_band(self):
+        # pre-multiplier 1.540-2.000 -> final band 1.540-2.100: the
+        # v0.1.10 field finding (observed clustered at upper * 1.05)
+        parsed = X.parse_log(melee_line('hit', 160))['melee']
+
+        self.assertAlmostEqual(1.540, parsed[0]['lower'])
+        self.assertAlmostEqual(2.000 * 1.05, parsed[0]['upper'])
+
+    def test_bounds_check_accepts_the_full_final_band(self):
+        # base 100, final band [1.540, 2.100]: 209 in, 212 out;
+        # the spike (exactly 100) is legal although below the band
+        lines = ([melee_line_v3('hit', 209)] * 49
+                 + [melee_line_v3('hit', 100)])
+        result = X.check_pdif_bounds(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('PASS', result['verdict'])
+
+        lines = [melee_line_v3('hit', 212)] * 50
+        result = X.check_pdif_bounds(X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('FAIL', result['verdict'])
+
+    def test_ws_tp_field_parses_and_stays_optional(self):
+        with_tp = X.parse_log(ws_line_v3('raging_axe', 400, tp=1300))['ws']
+        without = X.parse_log(ws_line_v2('raging_axe', 400))['ws']
+
+        self.assertEqual(1300, with_tp[0]['tp'])
+        self.assertIsNone(without[0]['tp'])
+
+
+class HitRatePooledTests(unittest.TestCase):
+    def test_pooled_pass(self):
+        # predicted 0.81 pooled; observed 81/100 landed
+        lines = ([melee_line_v3('hit', 180, hit_rate=0.81)] * 81
+                 + [melee_line_v3('miss', 0, hit_rate=0.81)] * 19)
+        result = X.check_hit_rate_pooled(
+            X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('PASS', result['verdict'])
+        self.assertEqual(100, result['swings'])
+
+    def test_pooled_fail_when_model_is_off(self):
+        # predicted 0.95 but only 60% land: CI excludes the prediction
+        lines = ([melee_line_v3('hit', 180, hit_rate=0.95)] * 120
+                 + [melee_line_v3('miss', 0, hit_rate=0.95)] * 80)
+        result = X.check_hit_rate_pooled(
+            X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual('FAIL', result['verdict'])
+
+    def test_counts_legacy_miss_labels_too(self):
+        lines = ([melee_line_v3('hit', 180, hit_rate=0.81)] * 81
+                 + [melee_line('other:15', 0, hit_rate=0.81)] * 19)
+        result = X.check_hit_rate_pooled(
+            X.parse_log('\n'.join(lines))['melee'])
+
+        self.assertEqual(100, result['swings'])
+        self.assertEqual('PASS', result['verdict'])
 
 
 class MeleeMeanTests(unittest.TestCase):

@@ -54,7 +54,7 @@
 
 addon.name    = 'whetstone'
 addon.author  = 'Whetstone'
-addon.version = '0.1.10-beta'
+addon.version = '0.1.11-beta'
 addon.desc    = 'Live melee damage advisor (75-cap era, Phoenix)'
 
 require('common')
@@ -224,6 +224,8 @@ end
 -- handler closures)
 local append_log
 local write_session_header
+local header_pending = false -- header written before char packets
+                             -- resolved; re-emit on first good snapshot
 local run_selftest
 local snapshot -- defined after the data helpers; captured by the
                -- command handler (the /whet panel crash was this name
@@ -857,6 +859,15 @@ local function update_expectations(snap, report)
         return
     end
 
+    -- The header written at /whet debug time can predate the 0x061/
+    -- 0x062 packets (weapon=nil, accuracy=-1) while predictions flow
+    -- afterwards. The first SUCCESSFUL snapshot re-emits it so the
+    -- log's assumed state is never permanently incomplete.
+    if header_pending then
+        header_pending = false
+        write_session_header(true)
+    end
+
     -- Worst-case candidate point, mirroring the advisor's math.
     local worst
 
@@ -877,7 +888,8 @@ local function update_expectations(snap, report)
     local ws_by_id = {}
     for _, ranked in ipairs(report.ws or {}) do
         ws_by_id[ranked.entry.id] =
-            { name = ranked.name, expected = ranked.expected }
+            { name = ranked.name, expected = ranked.expected,
+              tp = snap.tp }
     end
 
     -- The logged prediction must include crits: observations do.
@@ -946,11 +958,19 @@ append_error = function(name, traceback)
 end
 
 -- Dump the full assumed state at the top of a debug session so every
--- swing line in the log can be interpreted offline.
-write_session_header = function()
+-- swing line in the log can be interpreted offline. When the initial
+-- header predates the 0x061/0x062 packets (weapon=nil), the first
+-- successful snapshot re-emits it as an UPDATE (is_update = true).
+write_session_header = function(is_update)
     local ok, snap = pcall(snapshot)
     local gear = player.gear_stats(player.state.equipment,
                                    data.items or {})
+
+    if not is_update then
+        -- snapshot failing here means the header is incomplete;
+        -- update_expectations re-emits once state resolves
+        header_pending = not (ok and snap ~= nil)
+    end
 
     local level_range = nil
     if state.last_report and state.last_report.target
@@ -961,6 +981,7 @@ write_session_header = function()
 
     append_log(swinglog.session_header(
     {
+        update       = is_update or nil,
         version      = addon.version,
         profile      = cfg.profile,
         stats        = player.state.char_stats or {},

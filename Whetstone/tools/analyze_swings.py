@@ -7,8 +7,16 @@ verdict per beta-checklist item:
     HIT_CEILING   observed miss rate vs the predicted ceiling, with a
                   Wilson 95% CI - settles the 95-vs-99 cap question
                   (only evaluated over swings logged AT the cap)
-    PDIF_BOUNDS   per-swing observed/base must fall inside the
-                  predicted pDIF bounds (x 1.00-1.05 melee random)
+    HIT_RATE_POOLED  observed landed fraction over ALL swings vs the
+                  pooled predicted hit rate (Wilson CI) - catches an
+                  off accuracy model even far from the cap
+    PDIF_BOUNDS   per-swing observed/base must fall inside the FINAL
+                  predicted band (roll x 1.00-1.05 melee random; new
+                  logs print it directly as pdif_final=, legacy
+                  pdif_range= is normalized at parse). The spike is
+                  exactly 1.0 x base - the source early-returns
+                  BEFORE the multiplier - and is always legal even
+                  below the band
     SPIKE         frequency of damage == exactly 1.0 x base vs the
                   predicted spike chance (~1/3 near wRatio 1.0)
     CRIT_RATE     observed crit frequency among landed swings vs the
@@ -48,20 +56,27 @@ import re
 import sys
 from collections import defaultdict
 
-# predicted_landed= and hits= are optional: logs from <= v0.1.7 lack
-# them and must keep parsing.
+# predicted_landed=, tp= and hits= are optional: older logs lack them
+# and must keep parsing. Bounds come in two formats:
+#   pdif_range=L-U   (<= v0.1.10): PRE-multiplier - the final band is
+#                    [L * 1.00, U * 1.05] (the v0.1.10 field finding:
+#                    observed ratios clustered at exactly U * 1.05)
+#   pdif_final=L-U   (>= v0.1.11): POST-multiplier, used as-is
+# parse_log() normalizes both into final-band lower/upper.
 MELEE_RE = re.compile(
     r'melee (?P<outcome>\S+) observed=(?P<observed>\d+) '
     r'predicted_mean=(?P<mean>-?[\d.]+) '
     r'(?:predicted_landed=(?P<landed>-?[\d.]+) )?'
     r'base=(?P<base>-?\d+) spike=(?P<spike>-?[\d.]+) '
-    r'pdif_range=(?P<lower>-?[\d.]+)-(?P<upper>-?[\d.]+) '
+    r'(?:pdif_range=(?P<pre_lower>-?[\d.]+)-(?P<pre_upper>-?[\d.]+)'
+    r'|pdif_final=(?P<fin_lower>-?[\d.]+)-(?P<fin_upper>-?[\d.]+)) '
     r'hit_rate=(?P<hit_rate>-?[\d.]+) '
     r'crit_rate=(?P<crit_rate>-?[\d.]+) target=(?P<target>.+)$')
 
 WS_RE = re.compile(
     r'ws id=(?P<id>\d+) name=(?P<name>\S+) observed=(?P<observed>\d+) '
     r'predicted_mean=(?P<mean>\S+) '
+    r'(?:tp=(?P<tp>\S+) )?'
     r'(?:hits=(?P<hits_landed>\d+)/(?P<hits_rolled>\d+) )?'
     r'target=(?P<target>.+)$')
 
@@ -99,6 +114,14 @@ def parse_log(text: str) -> dict:
         match = MELEE_RE.search(line)
         if match:
             row = match.groupdict()
+            # normalize bounds to the FINAL band (post melee random)
+            if row['fin_lower'] is not None:
+                lower = float(row['fin_lower'])
+                upper = float(row['fin_upper'])
+            else:
+                lower = float(row['pre_lower'])
+                upper = float(row['pre_upper']) * MELEE_RANDOM_MAX
+
             melee.append({
                 'outcome': row['outcome'],
                 'observed': int(row['observed']),
@@ -107,8 +130,8 @@ def parse_log(text: str) -> dict:
                                else float(row['landed']),
                 'base': int(row['base']),
                 'spike': float(row['spike']),
-                'lower': float(row['lower']),
-                'upper': float(row['upper']),
+                'lower': lower,
+                'upper': upper,
                 'hit_rate': float(row['hit_rate']),
                 'crit_rate': float(row['crit_rate']),
                 'target': row['target'],
@@ -123,6 +146,8 @@ def parse_log(text: str) -> dict:
                 'observed': int(row['observed']),
                 'mean': None if row['mean'] == 'n/a'
                         else float(row['mean']),
+                'tp': None if row['tp'] in (None, '?')
+                      else int(row['tp']),
                 'hits_landed': None if row['hits_landed'] is None
                                else int(row['hits_landed']),
                 'hits_rolled': None if row['hits_rolled'] is None
@@ -194,9 +219,11 @@ def check_pdif_bounds(melee: list) -> dict:
     outliers = []
 
     for row in hits:
+        # row bounds are already the FINAL band (parse_log normalizes
+        # both line formats); the spike (exactly base, BELOW the band
+        # when wRatio is high) is always legal
         low_dmg = math.floor(row['lower'] * row['base']) - 1
-        high_dmg = math.floor(
-            row['upper'] * MELEE_RANDOM_MAX * row['base']) + 1
+        high_dmg = math.floor(row['upper'] * row['base']) + 1
 
         is_spike = row['observed'] == row['base']
 
@@ -217,10 +244,10 @@ def check_pdif_bounds(melee: list) -> dict:
         result['verdict'] = 'FAIL'
         result['detail'] = ('%.1f%% of hits outside predicted pDIF '
                             'bounds (e.g. observed=%d base=%d '
-                            'range=[%.3f, %.3f])'
+                            'final_range=[%.3f, %.3f])'
                             % (fraction * 100, sample['observed'],
                                sample['base'], sample['lower'],
-                               sample['upper'] * MELEE_RANDOM_MAX))
+                               sample['upper']))
 
     return result
 
@@ -306,6 +333,47 @@ def check_crit_rate(melee: list) -> dict:
         result['detail'] = ('crit rate %.3f CI [%.3f, %.3f] excludes '
                             'predicted %.3f - check dDEX tier curve / '
                             'gear CRITHITRATE flow'
+                            % (result['rate'], low, high, predicted))
+
+    return result
+
+
+def check_hit_rate_pooled(melee: list) -> dict:
+    """Pooled hit rate over ALL swings (any predicted rate, not just
+    at-cap): observed landed fraction vs the mean predicted hit_rate,
+    Wilson 95% CI. Complements HIT_CEILING, which only judges capped
+    swings - an independent analyzer pass surfaced the gap."""
+    swings = [row for row in melee
+              if row['hit_rate'] >= 0
+              and (row['outcome'] in ('hit', 'crit')
+                   or row['outcome'] in MISS_OUTCOMES)]
+
+    result = {'check': 'HIT_RATE_POOLED', 'swings': len(swings)}
+
+    if len(swings) < 100:
+        result['verdict'] = 'INSUFFICIENT_DATA'
+        result['detail'] = 'need >= 100 swings (have %d)' % len(swings)
+        return result
+
+    landed = sum(1 for row in swings
+                 if row['outcome'] in ('hit', 'crit'))
+    predicted = sum(row['hit_rate'] for row in swings) / len(swings)
+
+    low, high = wilson_interval(landed, len(swings))
+    result['rate'] = landed / len(swings)
+    result['predicted'] = predicted
+    result['ci'] = (low, high)
+
+    if low <= predicted <= high:
+        result['verdict'] = 'PASS'
+        result['detail'] = ('landed %.3f CI [%.3f, %.3f] vs pooled '
+                            'predicted %.3f'
+                            % (result['rate'], low, high, predicted))
+    else:
+        result['verdict'] = 'FAIL'
+        result['detail'] = ('landed %.3f CI [%.3f, %.3f] excludes '
+                            'pooled predicted %.3f - accuracy model '
+                            'off (food/song acc? see WARN_EFFECTS)'
                             % (result['rate'], low, high, predicted))
 
     return result
@@ -425,6 +493,7 @@ def analyze(text: str) -> list:
 
     results = [
         check_hit_ceiling(parsed['melee']),
+        check_hit_rate_pooled(parsed['melee']),
         check_pdif_bounds(parsed['melee']),
         check_spike(parsed['melee']),
         check_crit_rate(parsed['melee']),

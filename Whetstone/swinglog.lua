@@ -215,7 +215,10 @@ end
 --   ws: one line PER USE (attempt). observed totals the landed hits
 --     (0 when everything whiffed), hits=landed/rolled. predicted_mean
 --     is the per-attempt expectation including hit rates, so ws
---     compares attempt-to-attempt as-is.
+--     compares attempt-to-attempt as-is. tp= is the TP the prediction
+--     assumed (snapshot's clamped ranking TP).
+--   pdif_final= is the POST-multiplier band (roll x [1.00, 1.05]);
+--     the spike outcome is exactly 1.0 x base, outside the band.
 function M.observe(action, player_id)
     if not action or action.actor ~= player_id or not M.expectations then
         return {}
@@ -248,20 +251,25 @@ function M.observe(action, player_id)
                 end
 
                 -- base and spike feed tools/analyze_swings.py:
-                -- observed/base reconstructs pDIF per swing, and the
-                -- spike outcome lands at exactly 1.0 x base.
+                -- observed/base reconstructs pDIF per swing. The
+                -- logged band is the FINAL one - roll x melee random
+                -- [1.00, 1.05] (v0.1.10 field finding: the old
+                -- pdif_range= excluded the multiplier and observed
+                -- ratios clustered at upper x 1.05). The spike is
+                -- NOT in the band: the source early-returns exactly
+                -- 1.0 x base before the multiplier.
                 lines[#lines + 1] = string.format(
                     '%s melee %s observed=%d predicted_mean=%.1f '
                     .. 'predicted_landed=%.1f base=%d spike=%.3f '
-                    .. 'pdif_range=%.3f-%.3f hit_rate=%.2f '
+                    .. 'pdif_final=%.3f-%.3f hit_rate=%.2f '
                     .. 'crit_rate=%.3f target=%s',
                     when, outcome, result.damage,
                     predicted and predicted.expected or -1,
                     landed_mean,
                     predicted and predicted.base or -1,
                     predicted and predicted.pdif.spike_chance or -1,
-                    predicted and predicted.pdif.lower or -1,
-                    predicted and predicted.pdif.upper or -1,
+                    predicted and predicted.pdif.roll_min or -1,
+                    predicted and predicted.pdif.roll_max or -1,
                     predicted and predicted.hit_rate or -1,
                     predicted and predicted.crit_rate or -1,
                     M.expectations.target_name or '?')
@@ -285,13 +293,17 @@ function M.observe(action, player_id)
                 end
             end
 
+            -- tp= is the TP the PREDICTION assumed (the snapshot's
+            -- clamped ranking TP) - the comparison is only honest
+            -- when the WS actually fired near it.
             lines[#lines + 1] = string.format(
                 '%s ws id=%d name=%s observed=%d predicted_mean=%s '
-                .. 'hits=%d/%d target=%s',
+                .. 'tp=%s hits=%d/%d target=%s',
                 when, action.action_id,
                 predicted and predicted.name or '?', total,
                 predicted and string.format('%.1f', predicted.expected)
                     or 'n/a',
+                predicted and predicted.tp or '?',
                 landed, rolled,
                 M.expectations.target_name or '?')
         end
@@ -339,7 +351,15 @@ function M.session_header(p)
         lines[#lines + 1] = string.format(format, ...)
     end
 
-    add('=== whetstone session %s ===', os.date('%Y-%m-%d %H:%M:%S'))
+    if p.update then
+        -- the initial header predated the char packets; this block
+        -- carries the resolved state and supersedes it
+        add('=== whetstone session UPDATE %s (state resolved '
+            .. 'mid-session) ===', os.date('%Y-%m-%d %H:%M:%S'))
+    else
+        add('=== whetstone session %s ===', os.date('%Y-%m-%d %H:%M:%S'))
+    end
+
     add('version=%s profile=%s', p.version or '?', p.profile or 'phoenix')
 
     -- Data vintage: which server commit the loaded tables came from,
