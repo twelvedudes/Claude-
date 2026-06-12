@@ -129,7 +129,19 @@ but REQUIRED at runtime (release zips bundle them).
 | `Telegraph/config.lua` + `tests/test_config.lua` | fixed persistence pattern | **done (Phase 3)** |
 | `shared/selftest.lua` | check runner moved from Whetstone (one copy, require name unchanged) | **done (Phase 3)** |
 | `tools/package_release.py` | generalized: `--addon whetstone\|telegraph`, bundles shared modules into every zip | **done (Phase 3)** |
-| `Telegraph/tools/analyze_telegraph.py` | TP_ESTIMATE / CAST_TIME / WINDUP verdicts | Phase 4 |
+| `Telegraph/tools/analyze_telegraph.py` + tests | TP_ESTIMATE / CAST_TIME / WINDUP / BAR_OUTCOMES verdicts over `/tele debug` logs | **done (Phase 4)** |
+
+### Self-validation (Phase 4)
+
+`/tele debug` writes `telegraph_events.log`; the addon generates its
+own validation data and `analyze_telegraph.py` judges it:
+
+| Verdict | Truth source | What a FAIL means |
+| --- | --- | --- |
+| `TP_ESTIMATE` | every non-tp_free fire implies TP ≥ 1000 (`shouldUseTPMove`); the logged interval is the PRE-clamp estimate, so the clamp cannot grade itself | calibrated `hi < 1000` on > 10% of fires: a feed undercounts, or the deployed `MOB_TP_MULTIPLIER` ≠ 1 |
+| `CAST_TIME` | observed MagicStart→MagicFinish wall time vs `spell_list.castTime` (module-adjusted) | systematic shortfall: server-side fast-cast mods (out of model, documented); excess/scatter: table vintage vs server commit |
+| `WINDUP` | observed SkillStart→finish wall time vs `mob_prepare_time` | per-skill outliers: `OnMobSkillReadyTime` zone-script overrides (out of model, documented) |
+| `BAR_OUTCOMES` | bar terminations | high `replaced` rate = finish packets being missed (range/packet loss) — TP spend bookkeeping degrades with them |
 
 ### Glue-layer provenance (telegraph.lua)
 
