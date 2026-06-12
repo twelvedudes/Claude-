@@ -1,14 +1,17 @@
 --[[
-    Whetstone - selftest.lua
+    shared/selftest.lua
 
-    Pure check runner for `/whet selftest`: executes a list of named
-    checks (each a function returning a detail string, or raising) and
-    formats a diagnostic report. The point: in-game shakedown failures
-    arrive as a readable file naming the exact glue call that
-    misbehaved, instead of mystery silence.
+    Pure check runner for `/whet selftest` and `/tele selftest`:
+    executes a list of named checks (each a function returning a
+    detail string, or raising) and formats a diagnostic report. The
+    point: in-game shakedown failures arrive as a readable file naming
+    the exact glue call that misbehaved, instead of mystery silence.
 
-    whetstone.lua supplies the Ashita-touching closures; this module
-    never imports anything and is unit-tested offline.
+    Shared between the Whetstone and Telegraph addons under the ONE
+    require name 'selftest' (the module-identity discipline; see
+    shared/actionpacket.lua). Each addon's glue supplies its own
+    Ashita-touching check closures; this module never imports anything
+    and is unit-tested offline.
 ]]
 
 local M = {}

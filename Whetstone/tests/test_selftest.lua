@@ -70,7 +70,9 @@ local here = (arg and arg[0] and arg[0]:match('(.*[/\\])')) or ''
 package.path = table.concat(
 {
     here .. '../?.lua',
+    here .. '../../shared/?.lua',
     'Whetstone/?.lua',
+    'shared/?.lua',
     '?.lua',
     package.path,
 }, ';')

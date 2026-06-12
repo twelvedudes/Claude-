@@ -124,5 +124,20 @@ but REQUIRED at runtime (release zips bundle them).
 | `Telegraph/tools/extract_spells.py` + tests | spell id → name/castTime (+ module updates) | **done (Phase 2)** |
 | `Telegraph/tools/extract_mobskills.py` + tests | skill id → name/windup/tp_free | **done (Phase 2)** |
 | Whetstone `tools/extract_mobs.py` extension | cmbDelay/cmbSkill + TP mob mods per entry | **done (Phase 2)** |
-| `Telegraph/telegraph.lua` + ui/selftest/config | glue (pcall-latched), TextUnformatted UI, `/tele` | Phase 3 |
-| `Telegraph/tools/analyze_telegraph.py` | TP_ESTIMATE / CAST_TIME verdicts | Phase 4 |
+| `Telegraph/telegraph.lua` | glue: pcall-latched events, settings (T{} pattern), `/tele` commands, named selftest checks | **done (Phase 3, needs in-game shakedown)** |
+| `Telegraph/ui.lua` + `tests/test_ui.lua` | TextUnformatted-only panel (text bars), binding contract enforced by stub + source grep | **done (Phase 3)** |
+| `Telegraph/config.lua` + `tests/test_config.lua` | fixed persistence pattern | **done (Phase 3)** |
+| `shared/selftest.lua` | check runner moved from Whetstone (one copy, require name unchanged) | **done (Phase 3)** |
+| `tools/package_release.py` | generalized: `--addon whetstone\|telegraph`, bundles shared modules into every zip | **done (Phase 3)** |
+| `Telegraph/tools/analyze_telegraph.py` | TP_ESTIMATE / CAST_TIME / WINDUP verdicts | Phase 4 |
+
+### Glue-layer provenance (telegraph.lua)
+
+| Datum | Ground truth |
+| --- | --- |
+| Dynamic-entity id encoding (`id = 0x1000000 \| (zone << 12) \| index`) — `is_mob_id` and the id→index→name resolution | the same encoding `extract_mobs.py` reads out of `mob_spawn_points.mobid`; players sit below 0x1000000 |
+| Own-player H2H delay = client item delay + 480 | `itemutils.cpp` DPS comment / SQL convention (Whetstone PROVENANCE row); other weapons match the DAT delay |
+| `GetBaseDelay` sums main + sub weapon base delays for dual wielders | `battleutils.cpp` `GetBaseDelay` PC branch |
+| Era Dual Wield trait (NIN 10@10 / 15@25 / 25@45 / 30@65) | `sql/traits.sql` trait 18 mod 259, era rows only (rank 5 is ABYSSEA-tagged, absent at 75; DNC rows ABYSSEA-tagged — pre-WotG has no DNC) |
+| Era Martial Arts (MNK 80@1…180@75; PUP 80@25/100@50/120@75) | `sql/traits.sql` trait 23 mod 173 (PUP rows TOAU-tagged, live on a ToAU-era server) |
+| Own subtle blow gear NOT modeled (no item DB in Telegraph) | own-feed bounds stay exact-delay / zero-SB; gear SB narrows nothing — documented degradation |
