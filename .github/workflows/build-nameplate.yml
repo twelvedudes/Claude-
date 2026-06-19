@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -82,3 +82,22 @@ jobs:
           name: Nameplate-ashita-v4
           path: Nameplate/build/Nameplate.dll
           if-no-files-found: warn
+
+      # Publish the DLL as a Release asset so it has a stable, public, direct
+      # download link: .../releases/download/nameplate-v4/Nameplate.dll
+      - name: Publish DLL to Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nameplate-v4
+          name: Nameplate for Ashita v4 (latest build)
+          body: |
+            Automated build of `Nameplate.dll` for Ashita v4
+            (Ashita interface version 4.30).
+
+            Install: copy `Nameplate.dll` into `<Ashita v4 folder>\plugins\`,
+            then in game run `/load Nameplate` and `/nameplate help`.
+
+            Built from commit ${{ github.sha }}.
+          files: Nameplate/build/Nameplate.dll
+          make_latest: true
