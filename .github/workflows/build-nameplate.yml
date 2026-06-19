@@ -1,0 +1,84 @@
+name: Build Nameplate (Ashita v4)
+
+# Builds Nameplate/ for Ashita v4 on a Windows runner and uploads Nameplate.dll
+# as a downloadable artifact. Runs automatically on pushes to the working branch
+# and can also be triggered manually.
+
+on:
+  push:
+    branches:
+      - "claude/compassionate-hypatia-nwdkg3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Checkout Ashita v4 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: AshitaXI/Ashita-v4beta
+          path: ashita-v4-sdk
+          ref: main
+
+      # Provides the 32-bit MSVC libraries, Windows SDK headers and rc.exe on PATH.
+      # FFXI is a 32-bit process, so the plugin must be built as 32-bit (x86).
+      - name: Setup MSVC environment (x86)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_x86
+
+      - name: Setup CMake + Ninja
+        uses: lukka/get-cmake@latest
+        with:
+          ninjaVersion: latest
+
+      - name: Put LLVM/clang on PATH
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files\LLVM\bin\clang.exe") {
+            "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+          clang --version
+
+      - name: Configure (clang, Ninja, Ashita v4)
+        working-directory: Nameplate
+        shell: pwsh
+        run: |
+          cmake -B build -G Ninja --no-warn-unused-cli `
+            -DCMAKE_C_COMPILER=clang `
+            -DCMAKE_C_COMPILER_FORCED=ON `
+            -DCMAKE_CXX_COMPILER=clang `
+            -DCMAKE_CXX_COMPILER_FORCED=ON `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DTARGET_PLATFORM=ASHITA_V4 `
+            -DASHITA_SDK_PATH=${{ github.workspace }}/ashita-v4-sdk/plugins/sdk `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build
+        working-directory: Nameplate
+        shell: pwsh
+        run: cmake --build build --verbose
+
+      - name: Show outputs
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path Nameplate/build) {
+            Get-ChildItem -Recurse Nameplate/build -Include *.dll,*.lib,*.def | Format-Table FullName,Length
+          }
+
+      - name: Upload Nameplate.dll
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nameplate-ashita-v4
+          path: Nameplate/build/Nameplate.dll
+          if-no-files-found: warn
