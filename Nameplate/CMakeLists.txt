@@ -47,7 +47,12 @@ set_target_properties(Nameplate PROPERTIES
   CXX_EXTENSIONS OFF
 )
 
-target_compile_features(Nameplate PRIVATE cxx_std_26)
+# The C++26 standard is requested via the CXX_STANDARD target property above.
+# A target_compile_features(... cxx_std_26) call is intentionally NOT used here:
+# with CMAKE_CXX_COMPILER_FORCED=ON, CMake skips ABI/feature detection and leaves
+# CMAKE_CXX_COMPILE_FEATURES empty, which makes target_compile_features fail with
+# "no known features for CXX compiler". CXX_STANDARD still emits -std=c++26 and is
+# sufficient to enable C++ modules.
 
 target_sources(Nameplate PRIVATE
     src/Nameplate.cpp
