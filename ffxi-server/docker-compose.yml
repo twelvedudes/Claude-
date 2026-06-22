@@ -1,0 +1,131 @@
+# =============================================================================
+#  Ashen Era - FFXI private server (LandSandBoat, level-75 + Souls)
+#
+#  Production-style compose. It builds the server image from your local
+#  LandSandBoat checkout (./server, created by setup.sh), wires up MariaDB,
+#  imports the database, and runs the four game processes:
+#     connect (login/data/view) | world | search | map
+#
+#  Quick start:
+#     ./setup.sh                # clone LSB, install Souls modules, apply settings
+#     cp .env.example .env      # then edit credentials
+#     docker compose up -d
+#
+#  See README.md for the full walkthrough (and the client side).
+# =============================================================================
+
+x-dbcreds: &dbcreds
+  MARIADB_DATABASE: ${SQL_DATABASE:-xidb}
+  MARIADB_USER: ${SQL_USER:-xiadmin}
+  MARIADB_PASSWORD: ${SQL_PASSWORD:-password}
+  MARIADB_RANDOM_ROOT_PASSWORD: "true"
+
+x-server: &server
+  build:
+    context: ./server
+    dockerfile: docker/ubuntu.Dockerfile
+    args:
+      COMPILER: "gcc"
+      CMAKE_BUILD_TYPE: "Release"
+  image: ashen-era/server:local
+  pull_policy: never
+  restart: unless-stopped
+
+services:
+  database:
+    image: mariadb:lts
+    restart: always
+    command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_general_ci']
+    environment:
+      <<: *dbcreds
+    ports:
+      - "3306:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 20s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # One-shot: create/upgrade all tables and import LSB data. Exits when done.
+  setup_database:
+    <<: *server
+    command: ["python", "/server/tools/dbtool.py", "update"]
+    environment:
+      <<: *dbcreds
+      XI_NETWORK_SQL_HOST: database
+      XI_NETWORK_SQL_PORT: 3306
+    restart: "no"
+    depends_on:
+      database:
+        condition: service_healthy
+
+  connect:
+    <<: *server
+    command: ["/server/xi_connect"]
+    environment:
+      <<: *dbcreds
+      XI_NETWORK_SQL_HOST: database
+      XI_NETWORK_SQL_PORT: 3306
+      XI_NETWORK_ZMQ_IP: world
+    ports:
+      - "54001:54001"
+      - "54230:54230"
+      - "54231:54231"
+    depends_on:
+      setup_database:
+        condition: service_completed_successfully
+
+  world:
+    <<: *server
+    command: ["/server/xi_world"]
+    environment:
+      <<: *dbcreds
+      XI_NETWORK_HTTP_HOST: 0.0.0.0
+      XI_NETWORK_SQL_HOST: database
+      XI_NETWORK_SQL_PORT: 3306
+      XI_NETWORK_ZMQ_IP: world
+    ports:
+      - "8088:8088"
+    depends_on:
+      setup_database:
+        condition: service_completed_successfully
+
+  search:
+    <<: *server
+    command: ["/server/xi_search"]
+    environment:
+      <<: *dbcreds
+      XI_NETWORK_SQL_HOST: database
+      XI_NETWORK_SQL_PORT: 3306
+    ports:
+      - "54002:54002"
+    depends_on:
+      setup_database:
+        condition: service_completed_successfully
+
+  map:
+    <<: *server
+    command: ["/server/xi_map"]
+    environment:
+      <<: *dbcreds
+      XI_NETWORK_SQL_HOST: database
+      XI_NETWORK_SQL_PORT: 3306
+      XI_NETWORK_ZMQ_IP: world
+    ports:
+      - "54230:54230/udp"
+    volumes:
+      # Navmeshes are needed for mob pathing. See README "Navmeshes".
+      - ./server/navmeshes:/server/navmeshes
+    depends_on:
+      world:
+        condition: service_started
+      connect:
+        condition: service_started
+      search:
+        condition: service_started
+
+volumes:
+  dbdata:

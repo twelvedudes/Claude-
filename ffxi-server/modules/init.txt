@@ -1,0 +1,12 @@
+# Souls module loader for the "Ashen Era" FFXI server.
+#
+# Copy these lines into your LandSandBoat checkout's  modules/init.txt
+# (the setup.sh script does this for you), OR append them if you already
+# have other modules enabled. Order matters: souls/lua/souls_core.lua MUST
+# load first because it defines the global xi.souls namespace the rest use.
+
+souls/lua/souls_core.lua
+souls/lua/souls_earn.lua
+souls/lua/souls_death_penalty.lua
+souls/lua/souls_login.lua
+souls/commands/soul.lua
